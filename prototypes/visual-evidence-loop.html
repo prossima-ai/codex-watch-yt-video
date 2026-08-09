@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE — Codex watch visual-evidence loop</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1422;
+      --panel: #172236;
+      --panel-2: #202e45;
+      --line: #354966;
+      --text: #eff5fc;
+      --muted: #a8b8cc;
+      --accent: #5bd3a8;
+      --warn: #f0b95c;
+      --danger: #ef8178;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top right, #18304a 0, var(--bg) 38rem);
+      color: var(--text);
+    }
+    main { width: min(1180px, calc(100% - 32px)); margin: 34px auto 72px; }
+    header, section { background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--line); border-radius: 18px; }
+    header { padding: 28px; }
+    section { padding: 22px; margin-top: 18px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(1.8rem, 4vw, 2.8rem); line-height: 1.05; }
+    h2 { margin-bottom: 14px; font-size: 1.25rem; }
+    h3 { margin-bottom: 8px; font-size: 1rem; }
+    .eyebrow { color: var(--accent); font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .lede { max-width: 82ch; color: var(--muted); margin-bottom: 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: .88rem; }
+    input, select, button {
+      width: 100%; border-radius: 10px; border: 1px solid var(--line); background: #101a2a; color: var(--text);
+      padding: 10px 12px; font: inherit;
+    }
+    button { cursor: pointer; font-weight: 700; text-align: left; }
+    button:hover, button:focus-visible { border-color: var(--accent); outline: none; }
+    button.primary { background: var(--accent); color: #09271e; border-color: var(--accent); }
+    button.ghost { color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .actions button { width: auto; }
+    .state-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .datum { padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
+    .datum span { display: block; color: var(--muted); font-size: .78rem; margin-bottom: 4px; }
+    .datum strong { font-size: 1.05rem; }
+    .callout { border-left: 4px solid var(--accent); padding: 12px 14px; background: #132a2c; border-radius: 8px; }
+    .warning { border-left-color: var(--warn); background: #2c2518; }
+    .danger { border-left-color: var(--danger); background: #301d22; }
+    .timeline { list-style: none; padding: 0; display: grid; gap: 8px; }
+    .timeline li { display: grid; grid-template-columns: 84px 1fr; gap: 12px; padding: 9px 12px; background: #111c2d; border-radius: 9px; }
+    .timeline time { color: var(--accent); font-variant-numeric: tabular-nums; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); }
+    code { color: #a8e9d1; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .tabs button { width: auto; }
+    .tabs button[aria-selected="true"] { background: var(--accent); color: #09271e; border-color: var(--accent); }
+    .step-list { display: grid; gap: 9px; }
+    .step-list button.done { color: var(--muted); text-decoration: line-through; }
+    .pill { display: inline-block; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .75rem; }
+    .verdict { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .verdict button { min-height: 62px; }
+    #verdictText { margin-top: 12px; color: var(--accent); font-weight: 700; }
+    @media (max-width: 780px) {
+      .grid, .controls, .state-grid, .verdict { grid-template-columns: 1fr; }
+      .timeline li { grid-template-columns: 66px 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Throwaway logic prototype</div>
+    <h1>Codex watch visual-evidence loop</h1>
+    <p class="lede">Question: can one evidence plan preserve the four detail-mode meanings while giving Codex reliable, chronological frame batches, transcript alignment, and zero-work same-task follow-ups? Change the inputs, run the guided cases, and flag anything that feels wrong before it becomes specification.</p>
+  </header>
+
+  <section>
+    <h2>Free play</h2>
+    <div class="controls">
+      <label>Detail mode
+        <select id="mode">
+          <option value="transcript">transcript</option>
+          <option value="efficient">efficient</option>
+          <option value="balanced" selected>balanced</option>
+          <option value="token-burner">token-burner</option>
+        </select>
+      </label>
+      <label>Video duration (seconds)
+        <input id="duration" type="number" min="1" step="1" value="180">
+      </label>
+      <label>Focused range length (seconds; blank = full video)
+        <input id="focus" type="number" min="1" step="1" placeholder="full video">
+      </label>
+      <label>Transcript-cue timestamps
+        <input id="cues" value="00:31, 00:43" placeholder="00:31, 00:43">
+      </label>
+      <label>Frame width
+        <select id="width">
+          <option value="512">512 px</option>
+          <option value="768" selected>768 px</option>
+          <option value="1024">1024 px</option>
+        </select>
+      </label>
+      <label>Inspection batch size
+        <select id="batch">
+          <option value="4">4</option>
+          <option value="8" selected>8</option>
+          <option value="12">12</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" data-action="prepare">Prepare evidence</button>
+      <button data-action="answer">Answer from evidence</button>
+      <button data-action="followup">Ask same-video follow-up</button>
+      <button class="ghost" data-action="reset">Reset run</button>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Current state</h2>
+      <div id="state" class="state-grid"></div>
+      <div id="stateMessage" class="callout" style="margin-top: 12px"></div>
+    </section>
+    <section>
+      <h2>Evidence plan</h2>
+      <div id="plan"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Guided walkthroughs</h2>
+    <div id="tabs" class="tabs"></div>
+    <div id="scenario"></div>
+  </section>
+
+  <section>
+    <h2>Observed Codex Desktop calibration</h2>
+    <p class="lede">Three blind agents inspected the same 12-frame chronological sequence without access to its generator or expected answers. The sequence deliberately separated spoken “ready” from the board visibly becoming READY.</p>
+    <table>
+      <thead><tr><th>Input</th><th>Batch</th><th>Primary evidence</th><th>Fine print</th><th>Observed result</th></tr></thead>
+      <tbody>
+        <tr><td>512 px JPEG</td><td>4</td><td>12/12 correct</td><td>Operator <code>Q</code> misread as <code>0</code></td><td>Useful for ordinary scenes; insufficient when small text matters.</td></tr>
+        <tr><td>768 px JPEG</td><td>8 + 4</td><td>12/12 correct</td><td>12/12 exact</td><td>Candidate default: complete evidence with moderate file size.</td></tr>
+        <tr><td>1024 px JPEG</td><td>12</td><td>12/12 correct</td><td>12/12 exact</td><td>Candidate escalation for text-dense frames, not the default.</td></tr>
+        <tr><td>768 px PNG vs JPEG</td><td>8 matched images</td><td>No difference</td><td>No difference</td><td>Use JPEG for ordinary video; PNG only when lossless pixels matter.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout" style="margin-top: 14px">A follow-up agent correctly separated speech at 00:31 from the first visible READY sample at 00:36, retained the prior visual evidence without reopening images, and disclosed that six-second sampling bounds the transition to a window rather than an exact instant.</div>
+  </section>
+
+  <section>
+    <h2>Candidate decisions this prototype exposes</h2>
+    <ul>
+      <li>Keep JPEG as the ordinary frame format and 768 px as the default maximum width; re-extract a specific frame at 1024 px when small text or fine spatial detail is material.</li>
+      <li>Inspect every selected frame in chronological batches of eight. Twelve worked in the fixture, but eight leaves room for transcript and reasoning while preserving accuracy.</li>
+      <li>Keep frame timestamps absolute. Merge cue and ordinary frames before batching, and label each frame’s selection reason.</li>
+      <li>Keep speech and visual claims separate. A cue can request a frame, but transcript wording cannot substitute for visible evidence.</li>
+      <li>Reuse already-inspected frames and transcript for same-video follow-ups in the same task; reacquire only when the new question requires unsampled evidence.</li>
+      <li>Retain the parity baseline’s selection caps—0 ordinary frames for transcript, 50 for efficient, 100 for balanced, and no default cap for token-burner—because this fixture found no Codex-specific reason to change their meanings. Treat batching as an ingestion strategy, not a lower selection cap.</li>
+    </ul>
+    <div class="callout warning">Calibration boundary: the blind run validated up to 12 images per inspection batch, not complete 50-, 100-, or 251-frame watch requests. The final acceptance matrix must include those scale cases before release; this prototype does not pretend to prove them.</div>
+  </section>
+
+  <section>
+    <h2>Your verdict</h2>
+    <p class="lede">Click the closest reaction after trying the walkthroughs, then tell Codex what felt wrong. This prototype ticket stays open until a human accepts or changes the candidate decisions.</p>
+    <div class="verdict">
+      <button data-verdict="The evidence loop feels right as specified.">Feels right</button>
+      <button data-verdict="The mode budgets or batching need changes.">Change budgets or batching</button>
+      <button data-verdict="The evidence ordering, alignment, or reuse rules need changes.">Change evidence flow</button>
+    </div>
+    <div id="verdictText"></div>
+  </section>
+</main>
+
+<script>
+const EvidencePlanner = (() => {
+  const CAPS = { transcript: 0, efficient: 50, balanced: 100, "token-burner": Infinity };
+
+  const initialState = () => ({ phase: "not prepared", generation: 0, reused: false, lastAction: "Reset to a new watch request." });
+
+  const parseCueCount = value => value.split(",").map(item => item.trim()).filter(Boolean).length;
+
+  function fullVideoTarget(duration, cap) {
+    let target;
+    if (duration <= 30) target = Math.max(12, Math.min(30, Math.ceil(duration)));
+    else if (duration <= 60) target = 40;
+    else if (duration <= 180) target = 60;
+    else if (duration <= 600) target = 80;
+    else target = Number.isFinite(cap) ? cap : Math.ceil(duration / 6);
+    return Number.isFinite(cap) ? Math.min(target, cap) : target;
+  }
+
+  function focusedTarget(seconds, cap) {
+    let target;
+    if (seconds <= 5) target = 10;
+    else if (seconds <= 15) target = 30;
+    else if (seconds <= 30) target = 60;
+    else if (seconds <= 60) target = 80;
+    else target = Number.isFinite(cap) ? cap : Math.ceil(seconds * 2);
+    target = Math.min(target, Math.ceil(seconds * 2));
+    return Number.isFinite(cap) ? Math.min(target, cap) : target;
+  }
+
+  function buildPlan(inputs) {
+    const duration = Math.max(1, Number(inputs.duration) || 1);
+    const focus = inputs.focus === "" ? null : Math.max(1, Number(inputs.focus) || 1);
+    const cap = CAPS[inputs.mode];
+    const cues = parseCueCount(inputs.cues);
+    const cueSlots = inputs.mode === "transcript" ? cues : (Number.isFinite(cap) ? Math.min(cues, cap) : cues);
+    const ordinaryCapacity = Number.isFinite(cap) ? Math.max(0, cap - cueSlots) : Infinity;
+    const ordinary = inputs.mode === "transcript" ? 0 : Math.min(
+      focus === null ? fullVideoTarget(duration, cap) : focusedTarget(focus, cap),
+      ordinaryCapacity
+    );
+    const frames = cueSlots + ordinary;
+    const batches = frames === 0 ? 0 : Math.ceil(frames / Number(inputs.batch));
+    const warnings = [];
+    if (Number(inputs.width) === 512) warnings.push("Small text may be misread; use 768 px or re-extract the material frame at 1024 px.");
+    if (Number(inputs.batch) > 8) warnings.push("A 12-image batch passed the fixture, but eight is the conservative default.");
+    if (duration > 600 && focus === null && ["efficient", "balanced"].includes(inputs.mode)) warnings.push("Coverage is sparse; request a focus range or token-burner.");
+    if (frames > 250) warnings.push("High visual-context load; offer a focus range or explicit cap.");
+    if (inputs.mode === "transcript" && cues === 0) warnings.push("Transcript mode has no ordinary visual fallback; scope the answer to speech evidence.");
+    return {
+      cap: inputs.mode === "transcript" ? "0 ordinary" : (Number.isFinite(cap) ? cap : "none"),
+      cueSlots, ordinary, frames, batches, warnings,
+      format: "JPEG",
+      width: Number(inputs.width),
+      alignment: "absolute timestamps; chronological cue + ordinary merge; labeled selection reasons"
+    };
+  }
+
+  function reduce(state, action) {
+    if (action.type === "reset") return initialState();
+    if (action.type === "prepare") return { phase: "evidence prepared", generation: state.generation + 1, reused: false, lastAction: "Acquired transcript and frames once." };
+    if (action.type === "answer" && state.phase === "not prepared") return { ...state, lastAction: "Blocked: prepare evidence before answering." };
+    if (action.type === "answer") return { ...state, phase: "answer grounded", lastAction: "Inspected every selected frame and answered from labeled evidence." };
+    if (action.type === "followup" && state.phase !== "answer grounded" && state.phase !== "follow-up answered") return { ...state, lastAction: "Blocked: complete the first grounded answer before a follow-up." };
+    if (action.type === "followup") return { ...state, phase: "follow-up answered", reused: true, lastAction: "Reused the same task's transcript and inspected frames; no reacquisition." };
+    return state;
+  }
+
+  return { initialState, buildPlan, reduce };
+})();
+
+const scenarios = [
+  { name: "Transcript + cue", description: "Transcript mode ordinarily emits no frames. A visually grounded transcript cue reserves one frame without turning the run into a broad visual scan.", inputs: { mode: "transcript", duration: 180, focus: "", cues: "00:31", width: 768, batch: 8 }, steps: ["prepare", "answer", "followup"] },
+  { name: "Efficient long video", description: "A 20-minute full-video scan remains capped at 50 frames and warns that coverage is sparse instead of pretending exhaustive vision.", inputs: { mode: "efficient", duration: 1200, focus: "", cues: "", width: 768, batch: 8 }, steps: ["prepare", "answer"] },
+  { name: "Balanced focus", description: "A 30-second focus window gets denser sampling, keeps source-absolute timestamps, and reserves cue slots before ordinary frames.", inputs: { mode: "balanced", duration: 1800, focus: 30, cues: "12:04, 12:18", width: 768, batch: 8 }, steps: ["prepare", "answer", "followup"] },
+  { name: "Token-burner", description: "The uncapped mode keeps every selected scene, batches inspection chronologically, and warns only when the selected evidence exceeds 250 frames.", inputs: { mode: "token-burner", duration: 1800, focus: "", cues: "", width: 768, batch: 8 }, steps: ["prepare", "answer"] },
+  { name: "Text-dense escalation", description: "Ordinary frames stay at 768 px JPEG. A material small-text question escalates only the relevant frame to 1024 px rather than inflating the whole watch request.", inputs: { mode: "balanced", duration: 60, focus: 15, cues: "00:36", width: 1024, batch: 8 }, steps: ["prepare", "answer"] }
+];
+
+let state = EvidencePlanner.initialState();
+let activeScenario = 0;
+let scenarioStep = 0;
+
+const fields = ["mode", "duration", "focus", "cues", "width", "batch"];
+const readInputs = () => Object.fromEntries(fields.map(id => [id, document.getElementById(id).value]));
+
+function loadInputs(inputs) {
+  fields.forEach(id => { document.getElementById(id).value = inputs[id]; });
+  state = EvidencePlanner.initialState();
+  scenarioStep = 0;
+  render();
+}
+
+function renderState() {
+  const plan = EvidencePlanner.buildPlan(readInputs());
+  const data = [
+    ["Run phase", state.phase],
+    ["Acquisitions", state.generation],
+    ["Follow-up reused", state.reused ? "yes" : "not yet"],
+    ["Selected frames", plan.frames],
+    ["Inspection batches", plan.batches],
+    ["Mode cap", plan.cap]
+  ];
+  document.getElementById("state").innerHTML = data.map(([label, value]) => `<div class="datum"><span>${label}</span><strong>${value}</strong></div>`).join("");
+  document.getElementById("stateMessage").textContent = state.lastAction;
+}
+
+function renderPlan() {
+  const plan = EvidencePlanner.buildPlan(readInputs());
+  const warningHtml = plan.warnings.length
+    ? plan.warnings.map(item => `<div class="callout warning" style="margin-top:8px">${item}</div>`).join("")
+    : `<div class="callout" style="margin-top:8px">No mode-specific warning for this plan.</div>`;
+  document.getElementById("plan").innerHTML = `
+    <div class="state-grid">
+      <div class="datum"><span>Cue frames</span><strong>${plan.cueSlots}</strong></div>
+      <div class="datum"><span>Ordinary frames</span><strong>${plan.ordinary}</strong></div>
+      <div class="datum"><span>Frame encoding</span><strong>${plan.width}px ${plan.format}</strong></div>
+    </div>
+    <p style="margin:14px 0 4px"><span class="pill">Alignment</span> ${plan.alignment}</p>
+    ${warningHtml}`;
+}
+
+function renderScenario() {
+  const selected = scenarios[activeScenario];
+  document.getElementById("tabs").innerHTML = scenarios.map((scenario, index) => `<button aria-selected="${index === activeScenario}" data-scenario="${index}">${scenario.name}</button>`).join("");
+  document.getElementById("scenario").innerHTML = `
+    <p>${selected.description}</p>
+    <div class="step-list">${selected.steps.map((step, index) => `<button class="${index < scenarioStep ? "done" : ""}" data-step="${index}" ${index > scenarioStep ? "disabled" : ""}>${index + 1}. ${step === "prepare" ? "Prepare evidence once" : step === "answer" ? "Inspect all batches and answer" : "Ask a same-video follow-up without reacquisition"}</button>`).join("")}</div>`;
+}
+
+function dispatch(type) {
+  state = EvidencePlanner.reduce(state, { type });
+  renderState();
+}
+
+function render() { renderState(); renderPlan(); renderScenario(); }
+
+document.addEventListener("click", event => {
+  const action = event.target.dataset.action;
+  if (action) { dispatch(action); if (action === "reset") scenarioStep = 0; renderScenario(); }
+  if (event.target.dataset.scenario !== undefined) {
+    activeScenario = Number(event.target.dataset.scenario);
+    loadInputs(scenarios[activeScenario].inputs);
+  }
+  if (event.target.dataset.step !== undefined) {
+    const index = Number(event.target.dataset.step);
+    if (index === scenarioStep) {
+      dispatch(scenarios[activeScenario].steps[index]);
+      scenarioStep += 1;
+      renderScenario();
+    }
+  }
+  if (event.target.dataset.verdict) document.getElementById("verdictText").textContent = `Selected reaction: ${event.target.dataset.verdict} Tell Codex what you would change.`;
+});
+
+fields.forEach(id => document.getElementById(id).addEventListener("input", () => { state = EvidencePlanner.initialState(); scenarioStep = 0; render(); }));
+render();
+</script>
+</body>
+</html>
