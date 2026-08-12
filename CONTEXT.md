@@ -64,6 +64,10 @@ _Avoid_: Caption file, provider JSON, verbatim transcript
 The most recent single, unambiguous video URL or resolved local video path established by a watch request in the same task. It remains current even when later acquisition or processing fails, until another source replaces it.
 _Avoid_: Active video, cached video, last upload
 
+**Choice kind**:
+The category of pending user selection in a `decision_required` outcome: caption track, audio track, or transcription.
+_Avoid_: Decision type, selection category
+
 **Evidence coverage**:
 The extent to which an evidence stream covers the scope requested by the user: `complete`, `partial`, or `none`.
 _Avoid_: Confidence, completeness score
@@ -73,8 +77,8 @@ Whether trustworthy available evidence supports the requested conclusion: `suppo
 _Avoid_: Coverage, confidence score
 
 **Audio-upload consent**:
-Authorization to send extracted audio for one watch request to a configured transcription provider, unless the user has deliberately recorded a persistent provider-specific opt-in.
-_Avoid_: API permission, network consent
+Fresh, provider-specific authorization to send extracted audio for exactly one watch request. It is distinct from provider selection and separate host command-network approval.
+_Avoid_: API permission, network consent, persistent opt-in
 
 **Watch workspace**:
 A uniquely identified temporary directory containing the intermediate media and evidence for one watch request and eligible for removal only through validated cleanup.
