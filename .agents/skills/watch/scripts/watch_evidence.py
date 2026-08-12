@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TypeGuard
 from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
 
 
 EvidenceCoverageValue = Literal["complete", "partial", "none"]
@@ -221,6 +222,8 @@ CURRENT_SOURCE_NO_WORKSPACE = EvidenceDisposition(
 )
 JAVASCRIPT_NOT_CHECKED = JavaScriptSupport("not_checked", None)
 MAX_CAPTION_BYTES = 4 * 1024 * 1024
+SUPPORTED_CAPTION_FORMATS = frozenset({"ttml", "vtt"})
+CAPTION_FORMAT_PREFERENCE = ("vtt", "ttml")
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,13 @@ class _CaptionSelection:
     source_value: str
     decision_handle: str
     choice: CaptionChoice
+    metadata_probe: _SourceProbe
+
+
+@dataclass(frozen=True)
+class _TranscriptScope:
+    start_seconds: float
+    end_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -304,7 +314,7 @@ class WatchEvidenceRuntime:
             )
         assert controls is not None
 
-        selected_caption, selection_failure = self._selected_caption(
+        caption_selection, selection_failure = self._selected_caption(
             source, controls, prior_evidence
         )
         if selection_failure is not None:
@@ -314,6 +324,9 @@ class WatchEvidenceRuntime:
                 controls=controls,
                 failure=selection_failure,
             )
+        selected_caption = (
+            caption_selection.choice if caption_selection is not None else None
+        )
 
         source = Source(source.kind, source.value, True)
         tools, executable_paths, javascript_support = self._preflight(source.kind)
@@ -366,7 +379,9 @@ class WatchEvidenceRuntime:
             )
 
         try:
-            if source.kind == "local":
+            if caption_selection is not None:
+                metadata_result = caption_selection.metadata_probe
+            elif source.kind == "local":
                 metadata_result = self._local_metadata(required_path, source.value)
             else:
                 metadata_result = self._url_metadata(required_path, source.value)
@@ -466,7 +481,7 @@ class WatchEvidenceRuntime:
         source: Source,
         controls: WatchControls,
         prior_evidence: object | None,
-    ) -> tuple[CaptionChoice | None, Failure | None]:
+    ) -> tuple[_CaptionSelection | None, Failure | None]:
         selection_id = controls.caption_track
         if selection_id is None:
             return None, None
@@ -486,7 +501,7 @@ class WatchEvidenceRuntime:
                 "caption_track is unknown, stale, wrong-kind, or does not match the "
                 "same-task selection outcome.",
             )
-        return selection.choice, None
+        return selection, None
 
     def invalid_input(
         self, category: FailureCategory, message: str
@@ -890,7 +905,7 @@ class WatchEvidenceRuntime:
             if len(caption_choices) > 1:
                 decision_handle = _new_decision_handle()
                 self._register_caption_selections(
-                    source, decision_handle, caption_choices
+                    source, decision_handle, caption_choices, metadata_probe
                 )
                 coverage = EvidenceCoverage("complete", "none", "none", "partial")
                 report = _render_report(
@@ -978,7 +993,7 @@ class WatchEvidenceRuntime:
             caption_warnings += (
                 "Native captions are available, but no caption lines overlap the requested focus.",
             )
-        elif scope is None or unavailable_ranges:
+        elif scope is None or scope.end_seconds is None or unavailable_ranges:
             transcript_coverage = "partial"
         else:
             transcript_coverage = "complete"
@@ -1054,6 +1069,7 @@ class WatchEvidenceRuntime:
         source: Source,
         decision_handle: str,
         choices: Sequence[CaptionChoice],
+        metadata_probe: _SourceProbe,
     ) -> None:
         stale_ids = [
             choice_id
@@ -1067,6 +1083,7 @@ class WatchEvidenceRuntime:
                 source_value=source.value,
                 decision_handle=decision_handle,
                 choice=choice,
+                metadata_probe=metadata_probe,
             )
 
     def _download_caption(
@@ -1111,11 +1128,15 @@ class WatchEvidenceRuntime:
                 caption_files = sorted(
                     path
                     for path in Path(directory).iterdir()
-                    if path.is_file() and path.suffix.casefold() == ".vtt"
+                    if (
+                        path.is_file()
+                        and path.suffix.casefold()
+                        == f".{selected_caption.format}"
+                    )
                 )
                 if len(caption_files) != 1:
                     return None, (
-                        "Native caption retrieval did not produce one usable VTT file; transcript evidence is unavailable.",
+                        "Native caption retrieval did not produce one usable caption file; transcript evidence is unavailable.",
                     )
                 caption_path = caption_files[0]
                 if caption_path.stat().st_size > MAX_CAPTION_BYTES:
@@ -1123,8 +1144,8 @@ class WatchEvidenceRuntime:
                         "The selected native caption exceeds the safe parsing limit; transcript evidence is unavailable.",
                     )
                 try:
-                    caption_text = caption_path.read_text(encoding="utf-8-sig")
-                except (OSError, UnicodeError):
+                    caption_bytes = caption_path.read_bytes()
+                except OSError:
                     return None, (
                         "The selected native caption could not be read safely; transcript evidence is unavailable.",
                     )
@@ -1133,7 +1154,7 @@ class WatchEvidenceRuntime:
                 "Native caption retrieval could not run; transcript evidence is unavailable.",
             )
 
-        segments = _parse_webvtt(caption_text)
+        segments = _parse_caption(selected_caption.format, caption_bytes)
         if segments is None:
             return None, (
                 "The selected native caption could not be parsed; transcript evidence is unavailable.",
@@ -1453,7 +1474,7 @@ def _metadata_from_ytdlp(data: Mapping[str, object]) -> MetadataEvidence:
 def _caption_candidates_from_ytdlp(
     data: Mapping[str, object],
 ) -> tuple[_CaptionCandidate, ...]:
-    candidates: set[_CaptionCandidate] = set()
+    formats_by_track: dict[tuple[str, CaptionType], set[str]] = {}
     caption_catalogs: tuple[tuple[CaptionType, str], ...] = (
         ("manual", "subtitles"),
         ("automatic", "automatic_captions"),
@@ -1470,20 +1491,24 @@ def _caption_candidates_from_ytdlp(
                 raw_formats, (str, bytes)
             ):
                 continue
+            track_formats = formats_by_track.setdefault((language, caption_type), set())
             for raw_format in raw_formats:
                 if not isinstance(raw_format, Mapping):
                     continue
                 extension = _caption_format(raw_format.get("ext"))
                 if extension is None:
                     continue
-                candidates.add(
-                    _CaptionCandidate(
-                        language=language,
-                        caption_type=caption_type,
-                        format=extension,
-                        usable=extension == "vtt",
-                    )
-                )
+                track_formats.add(extension)
+    candidates = {
+        _CaptionCandidate(
+            language=language,
+            caption_type=caption_type,
+            format=_preferred_caption_format(formats),
+            usable=bool(formats & SUPPORTED_CAPTION_FORMATS),
+        )
+        for (language, caption_type), formats in formats_by_track.items()
+        if formats
+    }
     return tuple(
         sorted(
             candidates,
@@ -1494,6 +1519,13 @@ def _caption_candidates_from_ytdlp(
             ),
         )
     )
+
+
+def _preferred_caption_format(formats: set[str]) -> str:
+    for format_name in CAPTION_FORMAT_PREFERENCE:
+        if format_name in formats:
+            return format_name
+    return min(formats)
 
 
 def _caption_language(value: object) -> str | None:
@@ -1582,6 +1614,58 @@ _VTT_TIMING = re.compile(
     r"\s+-->\s+"
     r"(?P<end>(?:(?:\d{2,}):)?\d{2}:\d{2}\.\d{3})(?:\s+.*)?$"
 )
+_TTML_DISALLOWED_DECLARATION = re.compile(
+    br"<!\s*(?:doctype|entity)\b", re.IGNORECASE
+)
+_TTML_FRAME_CLOCK = re.compile(
+    r"^(?P<hours>\d+):(?P<minutes>\d{2}):(?P<seconds>\d{2}):"
+    r"(?P<frames>\d{2})(?:\.(?P<subframes>\d+))?$"
+)
+_TTML_MEDIA_CLOCK = re.compile(
+    r"^(?P<hours>\d+):(?P<minutes>\d{2}):(?P<seconds>\d{2})"
+    r"(?:\.(?P<fraction>\d+))?$"
+)
+_TTML_OFFSET_TIME = re.compile(
+    r"^(?P<number>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>h|m|ms|s|f|t)$"
+)
+_TTML_CONTENT_NAMESPACES = frozenset(
+    {
+        "",
+        "http://www.w3.org/ns/ttml",
+        "http://www.w3.org/2006/10/ttaf1",
+    }
+)
+_TTML_PARAMETER_NAMESPACES = frozenset(
+    {
+        "",
+        "http://www.w3.org/ns/ttml#parameter",
+        "http://www.w3.org/2006/10/ttaf1#parameter",
+    }
+)
+_TTML_TIMING_ATTRIBUTES = frozenset({"begin", "dur", "end", "timeContainer"})
+_TTML_PARAMETER_ATTRIBUTES = frozenset(
+    {"frameRate", "frameRateMultiplier", "subFrameRate", "tickRate", "timeBase"}
+)
+
+
+@dataclass(frozen=True)
+class _TTMLTiming:
+    frame_rate: float
+    sub_frame_rate: int
+    tick_rate: float
+
+
+def _parse_caption(
+    caption_format: str, value: bytes
+) -> tuple[TranscriptSegment, ...] | None:
+    if caption_format == "vtt":
+        try:
+            return _parse_webvtt(value.decode("utf-8-sig"))
+        except UnicodeDecodeError:
+            return None
+    if caption_format == "ttml":
+        return _parse_ttml(value)
+    return None
 
 
 def _parse_webvtt(value: str) -> tuple[TranscriptSegment, ...] | None:
@@ -1644,10 +1728,341 @@ def _parse_webvtt_timestamp(value: str) -> float | None:
     return seconds
 
 
-def _normalize_caption_text(lines: Sequence[str]) -> str | None:
+def _parse_ttml(value: bytes) -> tuple[TranscriptSegment, ...] | None:
+    if _TTML_DISALLOWED_DECLARATION.search(value.replace(b"\x00", b"")) is not None:
+        return None
+    try:
+        root = ET.fromstring(value)
+    except (ET.ParseError, UnicodeError, ValueError):
+        return None
+    if not _is_ttml_element(root, {"tt"}):
+        return None
+    time_base = _ttml_parameter_attribute(root, "timeBase")
+    if time_base is not None and time_base.strip().casefold() != "media":
+        return None
+    timing = _ttml_timing(root)
+    if timing is None:
+        return None
+
+    segments: list[TranscriptSegment] = []
+    try:
+        _collect_ttml_segments(
+            root,
+            parent_start_seconds=0.0,
+            parent_end_seconds=None,
+            timing=timing,
+            segments=segments,
+        )
+    except RecursionError:
+        return None
+    if not segments:
+        return None
+    return tuple(
+        sorted(segments, key=lambda segment: (segment.start_seconds, segment.end_seconds))
+    )
+
+
+def _xml_local_name(value: object) -> str:
+    return _xml_namespace_and_local_name(value)[1]
+
+
+def _xml_namespace_and_local_name(value: object) -> tuple[str, str]:
+    if not isinstance(value, str):
+        return "", ""
+    if value.startswith("{"):
+        namespace, separator, local_name = value[1:].partition("}")
+        if separator:
+            return namespace, local_name
+    return "", value.rsplit(":", 1)[-1]
+
+
+def _is_ttml_element(element: ET.Element, names: set[str]) -> bool:
+    namespace, local_name = _xml_namespace_and_local_name(element.tag)
+    return namespace in _TTML_CONTENT_NAMESPACES and local_name in names
+
+
+def _ttml_attribute(
+    element: ET.Element, name: str, allowed_namespaces: frozenset[str]
+) -> str | None:
+    for raw_name, value in element.attrib.items():
+        namespace, local_name = _xml_namespace_and_local_name(raw_name)
+        if local_name == name and namespace in allowed_namespaces:
+            return value
+    return None
+
+
+def _ttml_timing_attribute(element: ET.Element, name: str) -> str | None:
+    assert name in _TTML_TIMING_ATTRIBUTES
+    return _ttml_attribute(element, name, frozenset({""}))
+
+
+def _ttml_parameter_attribute(element: ET.Element, name: str) -> str | None:
+    assert name in _TTML_PARAMETER_ATTRIBUTES
+    return _ttml_attribute(element, name, _TTML_PARAMETER_NAMESPACES)
+
+
+def _ttml_timing(root: ET.Element) -> _TTMLTiming | None:
+    raw_frame_rate = _ttml_parameter_attribute(root, "frameRate")
+    if raw_frame_rate is None:
+        frame_rate = 30.0
+    else:
+        frame_rate = _positive_ttml_number(raw_frame_rate)
+        if frame_rate is None:
+            return None
+
+    multiplier = _ttml_parameter_attribute(root, "frameRateMultiplier")
+    if multiplier is not None:
+        multiplier_parts = multiplier.split()
+        if len(multiplier_parts) != 2:
+            return None
+        numerator = _positive_ttml_number(multiplier_parts[0])
+        denominator = _positive_ttml_number(multiplier_parts[1])
+        if numerator is None or denominator is None:
+            return None
+        frame_rate *= numerator / denominator
+        if not math.isfinite(frame_rate) or frame_rate <= 0:
+            return None
+
+    raw_sub_frame_rate = _ttml_parameter_attribute(root, "subFrameRate")
+    if raw_sub_frame_rate is None:
+        sub_frame_rate = 1
+    else:
+        try:
+            sub_frame_rate = int(raw_sub_frame_rate)
+        except ValueError:
+            return None
+        if sub_frame_rate <= 0:
+            return None
+
+    raw_tick_rate = _ttml_parameter_attribute(root, "tickRate")
+    if raw_tick_rate is None:
+        tick_rate = frame_rate * sub_frame_rate
+    else:
+        tick_rate = _positive_ttml_number(raw_tick_rate)
+        if tick_rate is None:
+            return None
+    if not math.isfinite(tick_rate) or tick_rate <= 0:
+        return None
+    return _TTMLTiming(frame_rate, sub_frame_rate, tick_rate)
+
+
+def _positive_ttml_number(value: object) -> float | None:
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _parse_ttml_time(value: str, timing: _TTMLTiming) -> float | None:
+    text = value.strip()
+    frame_clock = _TTML_FRAME_CLOCK.fullmatch(text)
+    if frame_clock is not None:
+        try:
+            hours = int(frame_clock.group("hours"))
+            minutes = int(frame_clock.group("minutes"))
+            seconds = int(frame_clock.group("seconds"))
+            frames = int(frame_clock.group("frames"))
+            subframes_text = frame_clock.group("subframes")
+            subframes = int(subframes_text) if subframes_text is not None else 0
+        except ValueError:
+            return None
+        if (
+            minutes >= 60
+            or seconds >= 60
+            or frames >= math.ceil(timing.frame_rate)
+            or subframes >= timing.sub_frame_rate
+        ):
+            return None
+        return (
+            hours * 3600
+            + minutes * 60
+            + seconds
+            + (frames + subframes / timing.sub_frame_rate) / timing.frame_rate
+        )
+
+    media_clock = _TTML_MEDIA_CLOCK.fullmatch(text)
+    if media_clock is not None:
+        try:
+            hours = int(media_clock.group("hours"))
+            minutes = int(media_clock.group("minutes"))
+            seconds = int(media_clock.group("seconds"))
+            fraction_text = media_clock.group("fraction")
+            fraction = (
+                float(f"0.{fraction_text}") if fraction_text is not None else 0.0
+            )
+        except ValueError:
+            return None
+        if minutes >= 60 or seconds >= 60:
+            return None
+        return hours * 3600 + minutes * 60 + seconds + fraction
+
+    offset = _TTML_OFFSET_TIME.fullmatch(text)
+    if offset is None:
+        return None
+    try:
+        number = float(offset.group("number"))
+    except ValueError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    unit = offset.group("unit")
+    multipliers = {
+        "h": 3600.0,
+        "m": 60.0,
+        "s": 1.0,
+        "ms": 0.001,
+        "f": 1.0 / timing.frame_rate,
+        "t": 1.0 / timing.tick_rate,
+    }
+    seconds = number * multipliers[unit]
+    return seconds if math.isfinite(seconds) else None
+
+
+def _ttml_interval(
+    element: ET.Element,
+    parent_start_seconds: float,
+    parent_end_seconds: float | None,
+    timing: _TTMLTiming,
+) -> tuple[float, float | None] | None:
+    begin_value = _ttml_timing_attribute(element, "begin")
+    begin_offset = 0.0
+    if begin_value is not None:
+        begin_offset = _parse_ttml_time(begin_value, timing)
+        if begin_offset is None:
+            return None
+    start_seconds = parent_start_seconds + begin_offset
+    end_candidates: list[float] = []
+    if parent_end_seconds is not None:
+        end_candidates.append(parent_end_seconds)
+
+    end_value = _ttml_timing_attribute(element, "end")
+    if end_value is not None:
+        end_offset = _parse_ttml_time(end_value, timing)
+        if end_offset is None:
+            return None
+        end_candidates.append(parent_start_seconds + end_offset)
+
+    duration_value = _ttml_timing_attribute(element, "dur")
+    if duration_value is not None:
+        duration_seconds = _parse_ttml_time(duration_value, timing)
+        if duration_seconds is None:
+            return None
+        end_candidates.append(start_seconds + duration_seconds)
+
+    end_seconds = min(end_candidates) if end_candidates else None
+    if end_seconds is not None and end_seconds <= start_seconds:
+        return None
+    return start_seconds, end_seconds
+
+
+def _collect_ttml_segments(
+    element: ET.Element,
+    *,
+    parent_start_seconds: float,
+    parent_end_seconds: float | None,
+    timing: _TTMLTiming,
+    segments: list[TranscriptSegment],
+) -> float | None:
+    interval = _ttml_interval(
+        element, parent_start_seconds, parent_end_seconds, timing
+    )
+    if interval is None:
+        return None
+    start_seconds, end_seconds = interval
+    element_name = _xml_local_name(element.tag)
+    if element_name == "p":
+        if end_seconds is None:
+            return None
+        if _has_timed_ttml_inline_content(element):
+            return end_seconds
+        text = _ttml_caption_text(element)
+        if text is not None:
+            segments.append(TranscriptSegment(text, start_seconds, end_seconds))
+        return end_seconds
+
+    time_container = (
+        _ttml_timing_attribute(element, "timeContainer") or "par"
+    ).strip().casefold()
+    if time_container not in {"par", "seq"}:
+        return None
+    timed_children = tuple(
+        child
+        for child in element
+        if _is_ttml_element(child, {"body", "div", "p"})
+    )
+    if time_container == "seq":
+        cursor = start_seconds
+        for child in timed_children:
+            child_end_seconds = _collect_ttml_segments(
+                child,
+                parent_start_seconds=cursor,
+                parent_end_seconds=end_seconds,
+                timing=timing,
+                segments=segments,
+            )
+            if child_end_seconds is None:
+                return None
+            cursor = child_end_seconds
+        if end_seconds is None:
+            return cursor if timed_children else None
+    else:
+        child_end_seconds: list[float] = []
+        for child in timed_children:
+            child_end = _collect_ttml_segments(
+                child,
+                parent_start_seconds=start_seconds,
+                parent_end_seconds=end_seconds,
+                timing=timing,
+                segments=segments,
+            )
+            if child_end is not None:
+                child_end_seconds.append(child_end)
+        if end_seconds is None:
+            return max(child_end_seconds, default=None)
+    return end_seconds
+
+
+def _has_timed_ttml_inline_content(element: ET.Element) -> bool:
+    for descendant in element.iter():
+        if descendant is element:
+            continue
+        if not _is_ttml_element(descendant, {"span", "br"}):
+            continue
+        if any(
+            _ttml_timing_attribute(descendant, name) is not None
+            for name in _TTML_TIMING_ATTRIBUTES
+        ):
+            return True
+    return False
+
+
+def _ttml_caption_text(element: ET.Element) -> str | None:
+    parts: list[str] = []
+
+    def visit(current: ET.Element) -> None:
+        if current.text:
+            parts.append(current.text)
+        for child in current:
+            if _is_ttml_element(child, {"br"}):
+                parts.append(" ")
+            else:
+                visit(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    visit(element)
+    return _normalize_caption_text(parts, strip_markup=False, unescape_html=False)
+
+
+def _normalize_caption_text(
+    lines: Sequence[str], *, strip_markup: bool = True, unescape_html: bool = True
+) -> str | None:
     text = " ".join(lines)
-    text = re.sub(r"<[^>]*>", "", text)
-    text = html.unescape(text)
+    if strip_markup:
+        text = re.sub(r"<[^>]*>", "", text)
+    if unescape_html:
+        text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     text = "".join(character for character in text if character.isprintable())
     if not text:
@@ -1657,18 +2072,18 @@ def _normalize_caption_text(lines: Sequence[str]) -> str | None:
 
 def _transcript_scope(
     controls: WatchControls, duration_seconds: float | None
-) -> TimeRange | None:
+) -> _TranscriptScope | None:
     start_seconds = controls.focus_start_seconds or 0.0
     end_seconds = controls.focus_end_seconds
     if end_seconds is None:
         end_seconds = duration_seconds
-    if end_seconds is None:
+    if end_seconds is None and controls.focus_start_seconds is None:
         return None
-    return TimeRange(start_seconds, end_seconds)
+    return _TranscriptScope(start_seconds, end_seconds)
 
 
 def _segments_overlapping_scope(
-    segments: Sequence[TranscriptSegment], scope: TimeRange | None
+    segments: Sequence[TranscriptSegment], scope: _TranscriptScope | None
 ) -> tuple[TranscriptSegment, ...]:
     if scope is None:
         return tuple(segments)
@@ -1676,12 +2091,14 @@ def _segments_overlapping_scope(
         segment
         for segment in segments
         if segment.end_seconds > scope.start_seconds
-        and segment.start_seconds < scope.end_seconds
+        and (
+            scope.end_seconds is None or segment.start_seconds < scope.end_seconds
+        )
     )
 
 
 def _ranges_for_segments(
-    segments: Sequence[TranscriptSegment], scope: TimeRange | None
+    segments: Sequence[TranscriptSegment], scope: _TranscriptScope | None
 ) -> tuple[TimeRange, ...]:
     ranges: list[TimeRange] = []
     for segment in segments:
@@ -1689,7 +2106,8 @@ def _ranges_for_segments(
         end_seconds = segment.end_seconds
         if scope is not None:
             start_seconds = max(start_seconds, scope.start_seconds)
-            end_seconds = min(end_seconds, scope.end_seconds)
+            if scope.end_seconds is not None:
+                end_seconds = min(end_seconds, scope.end_seconds)
         if end_seconds > start_seconds:
             ranges.append(TimeRange(start_seconds, end_seconds))
     return tuple(ranges)
@@ -1710,9 +2128,9 @@ def _merge_ranges(ranges: Sequence[TimeRange]) -> tuple[TimeRange, ...]:
 
 
 def _unavailable_ranges(
-    available_ranges: Sequence[TimeRange], scope: TimeRange | None
+    available_ranges: Sequence[TimeRange], scope: _TranscriptScope | None
 ) -> tuple[TimeRange, ...]:
-    if scope is None:
+    if scope is None or scope.end_seconds is None:
         return ()
     unavailable: list[TimeRange] = []
     cursor = scope.start_seconds
@@ -1908,6 +2326,11 @@ def _render_report(
             [
                 f"- Transcript provenance: `{transcript.provenance}`",
                 f"- Transcript language: `{transcript.language}`",
+                "- Selected caption track: "
+                f"`{transcript.selected_track.id}`; "
+                f"language `{transcript.selected_track.language}`, "
+                f"type `{transcript.selected_track.caption_type}`, "
+                f"format `{transcript.selected_track.format}`",
                 f"- Transcript segment count: `{len(transcript.segments)}`",
                 f"- Transcript source count: `{transcript.source_count}`",
             ]

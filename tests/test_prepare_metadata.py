@@ -59,9 +59,15 @@ elif "--verbose" in sys.argv:
 elif "--write-subs" in sys.argv or "--write-auto-subs" in sys.argv:
     caption_type = "manual" if "--write-subs" in sys.argv else "automatic"
     language = sys.argv[sys.argv.index("--sub-langs") + 1]
+    caption_format = sys.argv[sys.argv.index("--sub-format") + 1]
     output_template = sys.argv[sys.argv.index("--output") + 1]
-    Path(output_template.replace("%(ext)s", "vtt")).write_text(
-        CAPTION_BODIES[f"{{caption_type}}:{{language}}"], encoding="utf-8"
+    caption_body = CAPTION_BODIES.get(
+        f"{{caption_type}}:{{language}}:{{caption_format}}"
+    )
+    if caption_body is None:
+        caption_body = CAPTION_BODIES[f"{{caption_type}}:{{language}}"]
+    Path(output_template.replace("%(ext)s", caption_format)).write_text(
+        caption_body, encoding="utf-8"
     )
 else:
     print(json.dumps({payload_literal}))
@@ -422,6 +428,54 @@ else:
         )
         self.assertNotIn("Caption text", outcome["report_markdown"])
 
+    def test_transcript_detail_downloads_and_normalizes_a_sole_ttml_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, command_log = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "id": "ttml",
+                    "duration": 2.0,
+                    "ext": "webm",
+                    "vcodec": "vp9",
+                    "acodec": "opus",
+                    "is_live": False,
+                    "subtitles": {
+                        "en": [{"ext": "ttml", "url": "https://cdn.example/en.ttml"}]
+                    },
+                },
+                {
+                    "manual:en:ttml": """<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml"><body><div>
+  <p begin="00:00:00.000" end="00:00:02.000">TTML caption text</p>
+</div></body></tt>
+"""
+                },
+            )
+
+            outcome = self.run_request(
+                {
+                    "sources": ["https://video.example/watch?v=ttml"],
+                    "detail": "transcript",
+                    "source_network_approved": True,
+                },
+                env=environment,
+            )
+            invocations = self.read_invocations(command_log)
+
+        caption_invocation = next(args for args in invocations if "--write-subs" in args)
+        self.assertIn("--skip-download", caption_invocation)
+        self.assertEqual(
+            caption_invocation[caption_invocation.index("--sub-format") + 1], "ttml"
+        )
+        self.assertEqual(outcome["state"], "ready")
+        self.assertEqual(outcome["coverage"]["transcript"], "complete")
+        self.assertEqual(
+            outcome["evidence"]["transcript"]["selected_track"]["format"], "ttml"
+        )
+        self.assertNotIn("TTML caption text", outcome["report_markdown"])
+
     def test_selected_caption_is_scoped_to_its_runtime_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -515,6 +569,10 @@ else:
         self.assertEqual(
             resumed["evidence"]["transcript"]["provenance"], "manual_captions"
         )
+        metadata_invocations = [
+            args for args in invocations if "--dump-single-json" in args
+        ]
+        self.assertEqual(len(metadata_invocations), 2)
         caption_invocations = [args for args in invocations if "--write-subs" in args]
         self.assertEqual(len(caption_invocations), 1)
         self.assertIn("--skip-download", caption_invocations[0])
