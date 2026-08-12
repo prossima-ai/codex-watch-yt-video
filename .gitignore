@@ -5,6 +5,5 @@
 __pycache__/
 *.py[cod]
 
-# Generated TestSprite execution artifacts
-testsprite_tests/tmp/
-testsprite_tests/testsprite-mcp-test-report.html
+# TestSprite assets are local test artifacts, not repository source.
+testsprite_tests/
