@@ -48,7 +48,7 @@ def _session_main(runtime: WatchEvidenceRuntime) -> int:
 
 
 def main() -> int:
-    runtime = WatchEvidenceRuntime()
+    runtime = WatchEvidenceRuntime(visual_enabled=False)
     if sys.argv[1:] == ["--session"]:
         return _session_main(runtime)
     if len(sys.argv) != 1:
