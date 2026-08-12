@@ -129,6 +129,23 @@ else:
                 self.assertEqual(outcome["failure"]["category"], category)
                 self.assertIsNone(outcome["source"])
 
+    def test_unknown_control_escape_is_safe_in_failure_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "video.mp4"
+            source.write_bytes(b"fixture")
+            outcome = self.run_request(
+                {
+                    "sources": [str(source)],
+                    "\x1b[31m## state: ready": True,
+                }
+            )
+
+        self.assertEqual(outcome["state"], "stopped")
+        self.assertEqual(outcome["failure"]["category"], "invalid_control")
+        self.assertNotIn("\x1b", outcome["failure"]["message"])
+        self.assertIn("\\u001b[31m## state: ready", outcome["failure"]["message"])
+        self.assertNotIn("\x1b", outcome["report_markdown"])
+
     def test_missing_relative_local_source_reports_absolute_attempted_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             working_directory = Path(directory)
@@ -340,6 +357,86 @@ else:
                 self.assertEqual(outcome["failure"]["stage"], "validation")
                 self.assertEqual(outcome["failure"]["category"], category)
                 self.assertFalse(outcome["source"]["current"])
+
+    def test_focus_start_at_known_duration_stops_after_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, _ = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "duration": 1.0,
+                    "is_live": False,
+                },
+            )
+            outcome = self.run_request(
+                {
+                    "sources": ["https://video.example/watch?v=one"],
+                    "source_network_approved": True,
+                    "focus": ["00:00:01", None],
+                },
+                env=environment,
+            )
+
+        self.assertEqual(outcome["state"], "stopped")
+        self.assertTrue(outcome["source"]["current"])
+        self.assertEqual(outcome["failure"]["stage"], "metadata")
+        self.assertEqual(outcome["failure"]["category"], "invalid_focus")
+        self.assertEqual(outcome["failure"]["attempts"], 1)
+        self.assertIsNone(outcome["evidence"])
+
+    def test_cue_beyond_known_duration_stops_after_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, _ = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "duration": 1.0,
+                    "is_live": False,
+                },
+            )
+            outcome = self.run_request(
+                {
+                    "sources": ["https://video.example/watch?v=one"],
+                    "source_network_approved": True,
+                    "cues": ["00:00:01.001"],
+                },
+                env=environment,
+            )
+
+        self.assertEqual(outcome["state"], "stopped")
+        self.assertTrue(outcome["source"]["current"])
+        self.assertEqual(outcome["failure"]["stage"], "metadata")
+        self.assertEqual(outcome["failure"]["category"], "invalid_cues")
+        self.assertEqual(outcome["failure"]["attempts"], 1)
+        self.assertIsNone(outcome["evidence"])
+
+    def test_cues_outside_focus_are_dropped_and_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, _ = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "duration": 10.0,
+                    "is_live": False,
+                },
+            )
+            outcome = self.run_request(
+                {
+                    "sources": ["https://video.example/watch?v=one"],
+                    "source_network_approved": True,
+                    "focus": ["00:00:02", "00:00:04"],
+                    "cues": ["00:00:01", "00:00:03", "00:00:05"],
+                },
+                env=environment,
+            )
+
+        self.assertEqual(outcome["state"], "partial")
+        self.assertEqual(outcome["controls"]["cues_seconds"], [3.0])
+        self.assertEqual(outcome["controls"]["dropped_cues_count"], 2)
+        self.assertIn("Cues dropped outside focus: `2`", outcome["report_markdown"])
 
     def test_missing_required_tool_fails_with_guidance_and_no_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

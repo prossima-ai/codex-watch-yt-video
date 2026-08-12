@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import html
 import ipaddress
 import json
@@ -111,6 +111,7 @@ class WatchControls:
     focus_start_seconds: float | None
     focus_end_seconds: float | None
     cues_seconds: tuple[float, ...]
+    dropped_cues_count: int
     max_frames: int | None
     keep_duplicates: bool
     output_dir: str | None
@@ -319,6 +320,20 @@ class WatchEvidenceRuntime:
                 failure=metadata_result,
             )
 
+        controls, known_duration_failure = _normalize_controls_after_metadata(
+            controls, metadata_result.duration_seconds
+        )
+        if known_duration_failure is not None:
+            return self._failure_outcome(
+                state="stopped",
+                source=source,
+                warnings=warnings,
+                tools=tools,
+                javascript_support=javascript_support,
+                controls=controls,
+                failure=known_duration_failure,
+            )
+
         evidence = EvidenceBundle(metadata=metadata_result)
         coverage = EvidenceCoverage("complete", "none", "none", "partial")
         report = _render_report(
@@ -445,7 +460,9 @@ class WatchEvidenceRuntime:
             "source_network_approved",
         }
         unknown_fields = sorted(
-            str(field) for field in watch_request if field not in supported_fields
+            _escape_control_sequences(str(field))
+            for field in watch_request
+            if field not in supported_fields
         )
         if unknown_fields:
             return None, _validation_failure(
@@ -521,6 +538,7 @@ class WatchEvidenceRuntime:
                 focus_start_seconds=focus_start,
                 focus_end_seconds=focus_end,
                 cues_seconds=cues,
+                dropped_cues_count=0,
                 max_frames=max_frames,
                 keep_duplicates=keep_duplicates,
                 output_dir=output_dir,
@@ -841,6 +859,65 @@ def _metadata_failure(tool: str, diagnostic: str) -> Failure:
     )
 
 
+def _normalize_controls_after_metadata(
+    controls: WatchControls, duration_seconds: float | None
+) -> tuple[WatchControls, Failure | None]:
+    if (
+        duration_seconds is not None
+        and controls.focus_start_seconds is not None
+        and controls.focus_start_seconds >= duration_seconds
+    ):
+        return (
+            controls,
+            Failure(
+                stage="metadata",
+                category="invalid_focus",
+                message=(
+                    "focus start must be before the known source duration "
+                    f"({duration_seconds} seconds)."
+                ),
+                attempts=1,
+                disposition=CURRENT_SOURCE_NO_WORKSPACE,
+            ),
+        )
+    if duration_seconds is not None and any(
+        cue_seconds > duration_seconds for cue_seconds in controls.cues_seconds
+    ):
+        return (
+            controls,
+            Failure(
+                stage="metadata",
+                category="invalid_cues",
+                message=(
+                    "Every cue must be at or before the known source duration "
+                    f"({duration_seconds} seconds)."
+                ),
+                attempts=1,
+                disposition=CURRENT_SOURCE_NO_WORKSPACE,
+            ),
+        )
+    retained_cues = tuple(
+        cue_seconds
+        for cue_seconds in controls.cues_seconds
+        if (
+            controls.focus_start_seconds is None
+            or cue_seconds >= controls.focus_start_seconds
+        )
+        and (
+            controls.focus_end_seconds is None
+            or cue_seconds <= controls.focus_end_seconds
+        )
+    )
+    return (
+        replace(
+            controls,
+            cues_seconds=retained_cues,
+            dropped_cues_count=len(controls.cues_seconds) - len(retained_cues),
+        ),
+        None,
+    )
+
+
 def _metadata_from_ffprobe(payload: object) -> MetadataEvidence:
     data: Mapping[str, object] = payload if isinstance(payload, Mapping) else {}
     format_value = data.get("format")
@@ -1006,6 +1083,10 @@ def _render_report(
         lines.append(
             "- Cues seconds: "
             + ", ".join(f"`{timestamp}`" for timestamp in controls.cues_seconds)
+        )
+    if controls.dropped_cues_count:
+        lines.append(
+            f"- Cues dropped outside focus: `{controls.dropped_cues_count}`"
         )
     if controls.max_frames is not None:
         lines.append(f"- Maximum frames: `{controls.max_frames}`")
