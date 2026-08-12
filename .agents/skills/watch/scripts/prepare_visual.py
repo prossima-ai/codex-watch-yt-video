@@ -11,7 +11,7 @@ from watch_evidence import WatchEvidenceRuntime
 
 
 def main() -> int:
-    runtime = WatchEvidenceRuntime(visual_enabled=False)
+    runtime = WatchEvidenceRuntime()
     try:
         request: Any = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeError):
