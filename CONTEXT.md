@@ -68,6 +68,10 @@ _Avoid_: Active video, cached video, last upload
 The category of pending user selection in a `decision_required` outcome: caption track, audio track, or transcription.
 _Avoid_: Decision type, selection category
 
+**Decision handle**:
+An opaque task-session token emitted with a `decision_required` outcome. It binds sanitized choices to that session only; it neither selects a choice nor authorizes cross-task reuse.
+_Avoid_: Session key, persistent token, reusable cache key
+
 **Evidence coverage**:
 The extent to which an evidence stream covers the scope requested by the user: `complete`, `partial`, or `none`.
 _Avoid_: Confidence, completeness score
