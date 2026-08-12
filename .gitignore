@@ -1,2 +1,6 @@
 # Generated Playwright MCP diagnostics
 .playwright-mcp/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
