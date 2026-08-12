@@ -175,6 +175,15 @@ class VisualEvidence:
 
 
 @dataclass(frozen=True)
+class _VideoGeometry:
+    codec_name: str
+    width: int
+    height: int
+    sample_aspect_ratio: float | None
+    display_aspect_ratio: float | None
+
+
+@dataclass(frozen=True)
 class EvidenceBundle:
     metadata: MetadataEvidence
     transcript: None = None
@@ -876,6 +885,13 @@ class WatchEvidenceRuntime:
             if media_path is None:
                 return None, (acquisition_warning,)
 
+            source_geometry = self._source_video_geometry(ffprobe, media_path)
+            if source_geometry is None:
+                return None, (
+                    "Visual evidence was not prepared because source display geometry is "
+                    "unavailable; aspect-correct JPEG frames cannot be verified.",
+                )
+
             plan, planning_warnings = self._plan_visual_frames(
                 media_path=media_path,
                 metadata=metadata,
@@ -887,7 +903,7 @@ class WatchEvidenceRuntime:
                 candidates=plan.candidates,
                 media_path=media_path,
                 artifact_root=artifact_root,
-                metadata=metadata,
+                source_geometry=source_geometry,
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
             )
@@ -897,7 +913,7 @@ class WatchEvidenceRuntime:
                 batches=batches,
                 media_path=media_path,
                 artifact_root=artifact_root,
-                metadata=metadata,
+                source_geometry=source_geometry,
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
                 has_question=isinstance(question, str) and bool(question.strip()),
@@ -1065,12 +1081,26 @@ class WatchEvidenceRuntime:
                     scope_start=scope_start,
                     scope_end=scope_end,
                 )
-                if len(keyframes) >= 4:
+                (
+                    useful_keyframes,
+                    keyframe_deduplication,
+                    keyframe_warnings,
+                ) = self._prepare_ordinary_candidates(
+                    candidates=keyframes,
+                    media_path=media_path,
+                    ffmpeg=ffmpeg,
+                    keep_duplicates=controls.keep_duplicates,
+                )
+                if len(useful_keyframes) >= 4:
+                    ordinary_candidates = useful_keyframes
+                    deduplication = keyframe_deduplication
+                    warnings.extend(keyframe_warnings)
+                    fallback = "keyframe"
+                else:
                     ordinary_candidates, deduplication, ordinary_warnings = (
                         self._prepare_ordinary_candidates(
-                            candidates=_thin_to_work_budget(
-                                keyframes,
-                                _ordinary_work_budget(target, ordinary_capacity),
+                            candidates=_uniform_candidates(
+                                scope_start, scope_end, target
                             ),
                             media_path=media_path,
                             ffmpeg=ffmpeg,
@@ -1078,7 +1108,29 @@ class WatchEvidenceRuntime:
                         )
                     )
                     warnings.extend(ordinary_warnings)
-                    fallback = "keyframe"
+                    fallback = "uniform"
+            elif controls.detail == "balanced":
+                scenes = self._scene_candidates(
+                    ffmpeg=ffmpeg,
+                    media_path=media_path,
+                    scope_start=scope_start,
+                    scope_end=scope_end,
+                )
+                (
+                    useful_scenes,
+                    scene_deduplication,
+                    scene_warnings,
+                ) = self._prepare_ordinary_candidates(
+                    candidates=scenes,
+                    media_path=media_path,
+                    ffmpeg=ffmpeg,
+                    keep_duplicates=controls.keep_duplicates,
+                )
+                if len(useful_scenes) >= 2:
+                    ordinary_candidates = useful_scenes
+                    deduplication = scene_deduplication
+                    warnings.extend(scene_warnings)
+                    fallback = "scene"
                 else:
                     ordinary_candidates, deduplication, ordinary_warnings = (
                         self._prepare_ordinary_candidates(
@@ -1102,10 +1154,7 @@ class WatchEvidenceRuntime:
                 if scenes:
                     ordinary_candidates, deduplication, ordinary_warnings = (
                         self._prepare_ordinary_candidates(
-                            candidates=_thin_to_work_budget(
-                                scenes,
-                                _ordinary_work_budget(target, ordinary_capacity),
-                            ),
+                            candidates=scenes,
                             media_path=media_path,
                             ffmpeg=ffmpeg,
                             keep_duplicates=controls.keep_duplicates,
@@ -1342,7 +1391,7 @@ class WatchEvidenceRuntime:
         candidates: tuple[_FrameCandidate, ...],
         media_path: Path,
         artifact_root: Path,
-        metadata: MetadataEvidence,
+        source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
     ) -> tuple[tuple[VisualFrame, ...], tuple[str, ...]]:
@@ -1372,7 +1421,7 @@ class WatchEvidenceRuntime:
                     "-sn",
                     "-dn",
                     "-vf",
-                    "scale=w='min(768,iw)':h=-2",
+                    _square_pixel_scale_filter(768),
                     "-q:v",
                     "2",
                     "-n",
@@ -1385,15 +1434,17 @@ class WatchEvidenceRuntime:
                     f"{_format_seconds(candidate.timestamp_seconds)} because frame extraction failed."
                 )
                 continue
-            dimensions = self._jpeg_dimensions(ffprobe, frame_path)
-            if dimensions is None or not _valid_frame_dimensions(dimensions, metadata):
+            geometry = self._jpeg_geometry(ffprobe, frame_path)
+            if geometry is None or not _valid_frame_geometry(
+                geometry, source_geometry
+            ):
                 warnings.append(
                     "No visual frame was recorded for source time "
                     f"{_format_seconds(candidate.timestamp_seconds)} because the extracted "
                     "file was not an aspect-correct JPEG within the 768 px ordinary limit."
                 )
                 continue
-            width, height = dimensions
+            width, height = geometry.width, geometry.height
             frames.append(
                 VisualFrame(
                     timestamp_seconds=candidate.timestamp_seconds,
@@ -1408,7 +1459,23 @@ class WatchEvidenceRuntime:
             )
         return tuple(frames), tuple(warnings)
 
-    def _jpeg_dimensions(self, ffprobe: str, frame_path: Path) -> tuple[int, int] | None:
+    def _source_video_geometry(
+        self, ffprobe: str, media_path: Path
+    ) -> _VideoGeometry | None:
+        geometry = self._video_geometry(ffprobe, media_path)
+        if geometry is None or geometry.display_aspect_ratio is None:
+            return None
+        return geometry
+
+    def _jpeg_geometry(self, ffprobe: str, frame_path: Path) -> _VideoGeometry | None:
+        geometry = self._video_geometry(ffprobe, frame_path)
+        if geometry is None or geometry.codec_name not in {"mjpeg", "jpeg"}:
+            return None
+        return geometry
+
+    def _video_geometry(
+        self, ffprobe: str, media_path: Path
+    ) -> _VideoGeometry | None:
         result = self._command_runner.run(
             ffprobe,
             [
@@ -1417,10 +1484,10 @@ class WatchEvidenceRuntime:
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=codec_name,width,height",
+                "stream=codec_name,width,height,sample_aspect_ratio,display_aspect_ratio",
                 "-of",
                 "json",
-                str(frame_path),
+                str(media_path),
             ],
         )
         if result.returncode != 0:
@@ -1433,13 +1500,24 @@ class WatchEvidenceRuntime:
         stream = streams[0] if isinstance(streams, list) and streams else None
         if not isinstance(stream, Mapping):
             return None
-        if _optional_text(stream.get("codec_name")) not in {"mjpeg", "jpeg"}:
+        codec_name = _optional_text(stream.get("codec_name"))
+        if codec_name is None:
             return None
         width = _nonnegative_int(stream.get("width"))
         height = _nonnegative_int(stream.get("height"))
         if width is None or height is None or width == 0 or height == 0:
             return None
-        return width, height
+        sample_aspect_ratio = _positive_ratio(stream.get("sample_aspect_ratio"))
+        display_aspect_ratio = _positive_ratio(stream.get("display_aspect_ratio"))
+        if display_aspect_ratio is None and sample_aspect_ratio is not None:
+            display_aspect_ratio = width / height * sample_aspect_ratio
+        return _VideoGeometry(
+            codec_name=codec_name,
+            width=width,
+            height=height,
+            sample_aspect_ratio=sample_aspect_ratio,
+            display_aspect_ratio=display_aspect_ratio,
+        )
 
     def _inspect_visual_frames(
         self,
@@ -1448,7 +1526,7 @@ class WatchEvidenceRuntime:
         batches: tuple[tuple[VisualFrame, ...], ...],
         media_path: Path,
         artifact_root: Path,
-        metadata: MetadataEvidence,
+        source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
         has_question: bool,
@@ -1493,7 +1571,7 @@ class WatchEvidenceRuntime:
             escalations=inspection.escalations,
             media_path=media_path,
             artifact_root=artifact_root,
-            metadata=metadata,
+            source_geometry=source_geometry,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
             has_question=has_question,
@@ -1568,7 +1646,7 @@ class WatchEvidenceRuntime:
         escalations: tuple[FrameEscalation, ...],
         media_path: Path,
         artifact_root: Path,
-        metadata: MetadataEvidence,
+        source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
         has_question: bool,
@@ -1619,26 +1697,28 @@ class WatchEvidenceRuntime:
                     "-sn",
                     "-dn",
                     "-vf",
-                    "scale=w='min(1024,iw)':h=-2",
+                    _square_pixel_scale_filter(1024),
                     "-q:v",
                     "2",
                     "-n",
                     str(detail_path),
                 ],
             )
-            dimensions = self._jpeg_dimensions(ffprobe, detail_path)
+            geometry = self._jpeg_geometry(ffprobe, detail_path)
             if (
                 result.returncode != 0
                 or not detail_path.is_file()
-                or dimensions is None
-                or not _valid_frame_dimensions(dimensions, metadata, max_width=1024)
+                or geometry is None
+                or not _valid_frame_geometry(
+                    geometry, source_geometry, max_width=1024
+                )
             ):
                 warnings.append(
                     "The requested higher-resolution frame could not be extracted as an "
                     "aspect-correct JPEG within the 1024 px limit."
                 )
                 continue
-            width, height = dimensions
+            width, height = geometry.width, geometry.height
             detail_frames.append(
                 replace(
                     frame,
@@ -1722,20 +1802,6 @@ def _ordinary_frame_cap(controls: WatchControls) -> int | None:
         "balanced": 100,
         "token-burner": None,
     }[controls.detail]
-
-
-def _ordinary_work_budget(target: int, capacity: int | None) -> int:
-    # Fingerprinting is one subprocess per candidate. A finite output cap is an
-    # upper bound on that work too. The bounded planning target is a
-    # representative scene/keyframe sample; deduplication then happens before
-    # the final output cap. Uncapped token-burner remains intentionally uncapped.
-    return target if capacity is not None else 0
-
-
-def _thin_to_work_budget(
-    candidates: Sequence[_FrameCandidate], budget: int
-) -> tuple[_FrameCandidate, ...]:
-    return tuple(candidates) if budget == 0 else _thin_candidates(candidates, budget)[0]
 
 
 def _visual_scope(controls: WatchControls, duration_seconds: float) -> tuple[float, float]:
@@ -1875,19 +1941,33 @@ def _replace_frames(
     )
 
 
-def _valid_frame_dimensions(
-    dimensions: tuple[int, int], metadata: MetadataEvidence, *, max_width: int = 768
+def _square_pixel_scale_filter(max_width: int) -> str:
+    return (
+        f"scale=w='min({max_width},min(iw,iw*sar))':"
+        "h='2*trunc((ow/dar+1)/2)',setsar=1"
+    )
+
+
+def _valid_frame_geometry(
+    geometry: _VideoGeometry, source_geometry: _VideoGeometry, *, max_width: int = 768
 ) -> bool:
-    width, height = dimensions
+    width, height = geometry.width, geometry.height
     if width > max_width:
         return False
-    if metadata.width is not None and width > min(max_width, metadata.width):
+    if width > min(max_width, source_geometry.width):
         return False
-    if metadata.width is None or metadata.height is None or metadata.height == 0:
+    if (
+        geometry.sample_aspect_ratio is None
+        or not math.isclose(geometry.sample_aspect_ratio, 1.0, rel_tol=0.0, abs_tol=0.01)
+        or source_geometry.display_aspect_ratio is None
+    ):
         return False
-    expected_aspect = metadata.width / metadata.height
-    actual_aspect = width / height
-    return math.isclose(actual_aspect, expected_aspect, rel_tol=0.02, abs_tol=0.02)
+    return math.isclose(
+        width / height,
+        source_geometry.display_aspect_ratio,
+        rel_tol=0.02,
+        abs_tol=0.02,
+    )
 
 
 def _format_seconds(value: float) -> str:
@@ -2191,6 +2271,41 @@ def _nonnegative_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
+
+
+def _positive_ratio(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ratio = float(value)
+        return ratio if math.isfinite(ratio) and ratio > 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if ":" not in text:
+        try:
+            ratio = float(text)
+        except ValueError:
+            return None
+        return ratio if math.isfinite(ratio) and ratio > 0 else None
+    numerator_text, separator, denominator_text = text.partition(":")
+    if not separator or ":" in denominator_text:
+        return None
+    try:
+        numerator = float(numerator_text)
+        denominator = float(denominator_text)
+    except ValueError:
+        return None
+    if (
+        not math.isfinite(numerator)
+        or not math.isfinite(denominator)
+        or numerator <= 0
+        or denominator <= 0
+    ):
+        return None
+    return numerator / denominator
 
 
 def _escape_control_sequences(value: str) -> str:

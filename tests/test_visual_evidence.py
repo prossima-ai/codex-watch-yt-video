@@ -32,13 +32,17 @@ class RecordingMediaRunner:
         *,
         duration_seconds: float,
         scene_times: tuple[float, ...],
+        keyframe_times: tuple[float, ...] = (),
         same_fingerprint: bool = False,
+        fingerprints_by_timestamp: dict[float, str] | None = None,
         source_width: int | None = 1920,
         source_height: int | None = 1080,
     ) -> None:
         self.duration_seconds = duration_seconds
         self.scene_times = scene_times
+        self.keyframe_times = keyframe_times
         self.same_fingerprint = same_fingerprint
+        self.fingerprints_by_timestamp = fingerprints_by_timestamp or {}
         self.source_width = source_width
         self.source_height = source_height
         self.invocations: list[tuple[str, list[str]]] = []
@@ -61,6 +65,7 @@ class RecordingMediaRunner:
                         "vcodec": "h264",
                         "width": 1920,
                         "height": 1080,
+                        "aspect_ratio": 16 / 9,
                         "is_live": False,
                     }
                 ),
@@ -87,37 +92,63 @@ class RecordingMediaRunner:
                                 "codec_name": "h264",
                                 "width": self.source_width,
                                 "height": self.source_height,
+                                "sample_aspect_ratio": "1:1",
+                                "display_aspect_ratio": "16:9",
                             }
                         ],
                     }
                 ),
                 "",
             )
-        if "-show_entries" in args:
-            width, height = (
-                (1024, 576)
-                if str(args[-1]).endswith("-detail.jpg")
-                else (768, 432)
-            )
+        if "-skip_frame" in args:
             return CommandResult(
                 0,
                 json.dumps(
                     {
-                        "streams": [
-                            {"codec_name": "mjpeg", "width": width, "height": height}
+                        "frames": [
+                            {"best_effort_timestamp_time": timestamp}
+                            for timestamp in self.keyframe_times
                         ]
                     }
                 ),
                 "",
             )
-        if "-skip_frame" in args:
-            return CommandResult(0, json.dumps({"frames": []}), "")
+        if "-show_entries" in args:
+            if str(args[-1]).endswith(".jpg"):
+                width, height = (
+                    (1024, 576)
+                    if str(args[-1]).endswith("-detail.jpg")
+                    else (768, 432)
+                )
+                codec_name = "mjpeg"
+            else:
+                width, height = self.source_width, self.source_height
+                codec_name = "h264"
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "codec_name": codec_name,
+                                "width": width,
+                                "height": height,
+                                "sample_aspect_ratio": "1:1",
+                                "display_aspect_ratio": "16:9",
+                            }
+                        ]
+                    }
+                ),
+                "",
+            )
         if "framemd5" in args:
             timestamp = args[args.index("-ss") + 1]
             fingerprint = (
                 "0" * 32
                 if self.same_fingerprint
-                else hashlib.sha256(timestamp.encode()).hexdigest()[:32]
+                else self.fingerprints_by_timestamp.get(
+                    float(timestamp), hashlib.sha256(timestamp.encode()).hexdigest()[:32]
+                )
             )
             return CommandResult(
                 0, f"0, 0, 0, 1, 576, {fingerprint}\n", ""
@@ -244,7 +275,7 @@ if "-version" in sys.argv:
     print("ffprobe version 7.1")
 elif sys.argv[-1].endswith(".jpg"):
     print(json.dumps({"streams": [
-        {"codec_name": "mjpeg", "width": 768, "height": 432},
+        {"codec_name": "mjpeg", "width": 768, "height": 432, "sample_aspect_ratio": "1:1"},
     ]}))
 elif "-skip_frame" in sys.argv:
     print(json.dumps({"frames": [
@@ -255,7 +286,14 @@ else:
     print(json.dumps({
         "format": {"duration": "10", "format_name": "mov,mp4", "size": "1234"},
         "streams": [
-            {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1920,
+                "height": 1080,
+                "sample_aspect_ratio": "1:1",
+                "display_aspect_ratio": "16:9",
+            },
         ],
     }))
 """,
@@ -369,7 +407,11 @@ else:
             self.assertEqual(len(extraction_calls), len(frames))
             self.assertTrue(
                 all(
-                    any("min(768,iw)" in argument for argument in args)
+                    any(
+                        "min(768,min(iw,iw*sar))" in argument
+                        and "setsar=1" in argument
+                        for argument in args
+                    )
                     for args in extraction_calls
                 )
             )
@@ -494,7 +536,35 @@ else:
             )
         )
         self.assertTrue(any("-skip_frame" in args for args in invocations))
-        self.assertEqual(sum("framemd5" in args for args in invocations), 4)
+        # Keyframes are evaluated before selecting the uniform fallback, then the
+        # uniform candidates are independently deduplicated.
+        self.assertEqual(sum("framemd5" in args for args in invocations), 7)
+
+    def test_efficient_mode_falls_back_after_dense_keyframes_are_not_useful(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "video.mp4"
+            source.write_bytes(b"synthetic fixture")
+            runtime = WatchEvidenceRuntime(
+                command_runner=RecordingMediaRunner(
+                    duration_seconds=2.0,
+                    scene_times=(),
+                    keyframe_times=(0.0, 0.1, 0.2, 0.6),
+                ),
+                find_executable=lambda name: name,
+                artifact_root=root / "artifacts",
+            )
+
+            outcome = runtime.prepare(
+                {"sources": [str(source)], "detail": "efficient", "max_frames": 4}
+            )
+
+        visual = outcome.evidence.visual  # type: ignore[union-attr]
+        self.assertEqual(visual.fallback, "uniform")
+        self.assertEqual(len(visual.frames), 4)
+        self.assertTrue(
+            all(frame.selection_reason in {"first", "uniform"} for frame in visual.frames)
+        )
 
     def test_balanced_scene_candidates_are_rate_limited_then_thinned_across_the_scope(
         self,
@@ -530,7 +600,9 @@ else:
         self.assertTrue(
             all(later - earlier >= 0.5 for earlier, later in zip(timestamps, timestamps[1:]))
         )
-        self.assertEqual(sum("framemd5" in args for args in invocations), 2)
+        # Deduplication sees all rate-limited scene candidates before the final
+        # cap thins the selected ordinary frames.
+        self.assertEqual(sum("framemd5" in args for args in invocations), 4)
 
     def test_cue_priority_keeps_the_final_selection_at_or_below_two_frames_per_second(
         self,
@@ -566,18 +638,17 @@ else:
             timestamps,
         )
 
-    def test_scene_candidates_are_deduplicated_before_the_frame_cap(self) -> None:
+    def test_balanced_mode_falls_back_after_static_scene_candidates_collapse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "video.mp4"
             source.write_bytes(b"synthetic fixture")
-            runner = RecordingMediaRunner(
-                duration_seconds=3.0,
-                scene_times=(0.0, 1.0, 2.0),
-                same_fingerprint=True,
-            )
             runtime = WatchEvidenceRuntime(
-                command_runner=runner,
+                command_runner=RecordingMediaRunner(
+                    duration_seconds=3.0,
+                    scene_times=(0.0, 1.0, 2.0),
+                    same_fingerprint=True,
+                ),
                 find_executable=lambda name: name,
                 artifact_root=root / "artifacts",
             )
@@ -585,10 +656,9 @@ else:
             outcome = runtime.prepare({"sources": [str(source)], "detail": "balanced"})
 
         visual = outcome.evidence.visual  # type: ignore[union-attr]
-        self.assertEqual(visual.deduplication, "applied")
-        self.assertEqual(len(visual.frames), 1)
-        self.assertEqual(
-            sum("framemd5" in args for _, args in runner.invocations), 3
+        self.assertEqual(visual.fallback, "uniform")
+        self.assertTrue(
+            all(frame.selection_reason in {"first", "uniform"} for frame in visual.frames)
         )
 
     def test_keep_duplicates_skips_scene_deduplication(self) -> None:
@@ -672,17 +742,24 @@ else:
         self.assertEqual(efficient_visual.cap, 50)
         self.assertEqual(len(efficient_visual.frames), 50)
         self.assertEqual(balanced_visual.cap, 100)
-        self.assertEqual(len(balanced_visual.frames), 80)
+        self.assertEqual(len(balanced_visual.frames), 100)
         self.assertLessEqual(len(balanced_visual.frames), balanced_visual.cap)
 
-    def test_small_cap_bounds_fingerprint_work_before_deduplication(self) -> None:
+    def test_scene_candidates_are_deduplicated_before_a_small_frame_cap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "video.mp4"
             source.write_bytes(b"synthetic fixture")
             runner = RecordingMediaRunner(
-                duration_seconds=1_000.0,
-                scene_times=tuple(float(index) for index in range(1_000)),
+                duration_seconds=4.0,
+                scene_times=(0.0, 1.0, 2.0, 3.0, 4.0),
+                fingerprints_by_timestamp={
+                    0.0: "a" * 32,
+                    1.0: "b" * 32,
+                    2.0: "c" * 32,
+                    3.0: "b" * 32,
+                    4.0: "a" * 32,
+                },
             )
             runtime = WatchEvidenceRuntime(
                 command_runner=runner,
@@ -694,14 +771,14 @@ else:
                 {
                     "sources": [str(source)],
                     "detail": "balanced",
-                    "max_frames": 1,
+                    "max_frames": 2,
                 }
             )
 
         visual = outcome.evidence.visual  # type: ignore[union-attr]
-        self.assertEqual(len(visual.frames), 1)
+        self.assertEqual([frame.timestamp_seconds for frame in visual.frames], [0.0, 2.0])
         self.assertEqual(
-            sum("framemd5" in args for _, args in runner.invocations), 1
+            sum("framemd5" in args for _, args in runner.invocations), 5
         )
 
     def test_focused_scene_and_keyframe_scans_use_the_effective_interval(self) -> None:
@@ -958,10 +1035,10 @@ else:
         shutil.which("ffmpeg") and shutil.which("ffprobe"),
         "ffmpeg and ffprobe are required for this synthetic visual fixture",
     )
-    def test_real_ffmpeg_extracts_aspect_correct_ordinary_jpegs(self) -> None:
+    def test_real_ffmpeg_normalizes_anamorphic_video_to_square_pixel_jpegs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "landscape.mp4"
+            source = root / "anamorphic.mp4"
             generated = subprocess.run(
                 [
                     "ffmpeg",
@@ -972,7 +1049,9 @@ else:
                     "-f",
                     "lavfi",
                     "-i",
-                    "testsrc2=size=320x180:rate=5:duration=2",
+                    "testsrc2=size=720x480:rate=5:duration=2",
+                    "-vf",
+                    "setsar=32/27",
                     "-c:v",
                     "mpeg4",
                     str(source),
@@ -986,22 +1065,59 @@ else:
                 find_executable=lambda name: shutil.which(name)
                 if name in {"ffmpeg", "ffprobe"}
                 else None,
+                frame_inspector=EscalateFirstFrame(),
                 artifact_root=root / "artifacts",
             )
 
             outcome = runtime.prepare(
-                {"sources": [str(source)], "detail": "balanced", "max_frames": 3}
+                {
+                    "sources": [str(source)],
+                    "detail": "balanced",
+                    "max_frames": 3,
+                    "question": "What does the visible small text say?",
+                }
             )
 
-        visual = outcome.evidence.visual  # type: ignore[union-attr]
+            visual = outcome.evidence.visual  # type: ignore[union-attr]
+            frame_geometries = []
+            for frame in visual.frames:
+                probed = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        "stream=width,height,sample_aspect_ratio",
+                        "-of",
+                        "json",
+                        frame.path,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(probed.returncode, 0, probed.stderr)
+                frame_geometries.append(json.loads(probed.stdout)["streams"][0])
+
         self.assertTrue(visual.frames)
         self.assertTrue(all(frame.format == "jpeg" for frame in visual.frames))
-        self.assertTrue(all(frame.width <= 320 for frame in visual.frames))
         self.assertTrue(
             all(
-                abs((frame.width / frame.height) - (320 / 180)) < 0.02
+                frame.width <= (1024 if frame.resolution_reason is not None else 768)
                 for frame in visual.frames
             )
+        )
+        self.assertTrue(
+            all(
+                abs((frame.width / frame.height) - (16 / 9)) < 0.02
+                for frame in visual.frames
+            )
+        )
+        self.assertTrue(any(frame.resolution_reason is not None for frame in visual.frames))
+        self.assertTrue(
+            all(geometry["sample_aspect_ratio"] == "1:1" for geometry in frame_geometries)
         )
 
     def test_approved_public_source_downloads_to_a_controlled_path_without_cookie_flags(
@@ -1098,7 +1214,7 @@ else:
             any("Visual preparation failed" in warning for warning in outcome.warnings)
         )
 
-    def test_missing_source_dimensions_refuses_unverifiable_visual_frames(self) -> None:
+    def test_missing_source_dimensions_refuses_visual_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "video.mp4"
@@ -1116,11 +1232,10 @@ else:
 
             outcome = runtime.prepare({"sources": [str(source)]})
 
-        visual = outcome.evidence.visual  # type: ignore[union-attr]
-        self.assertFalse(visual.frames)
+        self.assertIsNone(outcome.evidence.visual)
         self.assertEqual(outcome.coverage.visual, "none")
         self.assertTrue(
-            any("aspect-correct JPEG" in warning for warning in outcome.warnings),
+            any("source display geometry" in warning for warning in outcome.warnings),
             outcome.warnings,
         )
 
