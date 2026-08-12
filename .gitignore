@@ -1,2 +1,9 @@
 # Generated Playwright MCP diagnostics
 .playwright-mcp/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# TestSprite assets are local test artifacts, not repository source.
+testsprite_tests/
