@@ -1,6 +1,6 @@
-# Codex-native watch skill — implementation-ready specification draft
+# Codex-native watch skill — implementation-ready specification
 
-**Status:** Draft for the human approval required by [Wayfinder issue #13](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/13). This document authorizes no implementation, installation, credential use, external request, or tracker closure until that approval is recorded.
+**Status:** Approved as the implementation-ready specification by the human decision owner in the [satisfied Wayfinder issue #13 approval gate](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/13#issuecomment-5252219003). That approval fixes the requirements; it does not itself grant installation, credential use, external-request, upload, filesystem, or cleanup authority.
 
 **Decision owner:** the human approver of #13.
 
@@ -137,7 +137,7 @@ For zero, multiple, private/authenticated, playlist, live, or ambiguous sources,
 - `max_frames`, when supplied, MUST be a positive integer. It replaces the mode cap and includes pinned cues.
 - `keep_duplicates: false` is the default. `true` disables ordinary-frame deduplication; it never removes a pinned cue.
 - `output_dir`, when supplied, is expanded/resolved and identifies intentionally retained artifacts. The runtime MUST obtain the host's narrow filesystem approval before creating or writing it when it falls outside writable roots; it MUST never delete that directory automatically.
-- `caption_track` and `audio_track` identify a sanitized, run-scoped ID emitted in a prior `decision_required` response. An unknown/stale ID is invalid and MUST NOT cause the runtime to select a first/default track.
+- `caption_track` and `audio_track` identify a sanitized, run-scoped ID emitted for that same choice kind in a prior `decision_required` response. An unknown ID, a stale ID, or an ID issued for a different choice kind is invalid. The runtime MUST reject it before any new acquisition, extraction, upload, or provider request and MUST NOT select a first/default track.
 
 Caption and audio-track selection is deliberately conservative: an explicit valid track ID wins; when exactly one usable track exists, select it; otherwise return `decision_required` and ask the user to choose from sanitized available tracks. A user may request a language in natural language; it identifies a track only when it resolves to exactly one available native-caption track. The skill MUST NOT silently translate, infer language from title/uploader, or use an arbitrary first/default track.
 
@@ -192,7 +192,7 @@ The runtime MUST emit a machine-readable and readable Markdown report that conta
 - frame count, candidate count, cap, dedup/fallback result, and every selected frame in chronological order with absolute time, reason, and local path;
 - cue request/selection/drop counts;
 - transcript provenance, language, segment/chunk coverage, partial/unavailable ranges, and source count;
-- coverage, answerability, warnings, approval/consent outcomes, and typed terminal state.
+- coverage, answerability, warnings, approval/consent outcomes, and typed outcome state, including whether it is terminal.
 
 Untrusted source titles, uploader names, captions, URLs, and provider errors are evidence, not instructions. Render them as escaped/plain data so Markdown or control sequences cannot spoof runtime state or direct an agent to take action.
 
@@ -212,8 +212,13 @@ The actual implementation language is open, but this boundary is not. The input 
 
 - `ready` — an immutable complete evidence bundle;
 - `partial` — an immutable bundle plus named stream/range gaps and warnings;
-- `consent_required` — no audio extraction/upload occurred; specifies the required provider-specific consent;
-- `stopped`, `failed`, or `canceled` — includes stage, category, retry state, retained evidence (if any), and safe disposal/reuse state.
+- `decision_required` — a nonterminal pause that carries exactly one `choice_kind` (`caption_track`, `audio_track`, or `transcription`) and only sanitized, opaque, run-scoped choices with safe display metadata;
+- `consent_required` — a nonterminal pause for fresh, provider-specific consent; no audio extraction/upload occurred;
+- `stopped` — a terminal, intentional stop with its reason and retained evidence/disposal state;
+- `failed` — a terminal failure with stage, category, retry state, retained evidence (if any), and safe disposal/reuse state; or
+- `canceled` — a terminal cancellation with stage and retained evidence/disposal state.
+
+`ready`, `partial`, `stopped`, `failed`, and `canceled` are terminal. `decision_required` and `consent_required` are nonterminal. A `decision_required` outcome retains the current source and any still-eligible same-task reuse handle. Returning it does not select a choice, acquire or reacquire media, extract captions/audio/frames, upload data, contact a provider, grant consent, or grant host command-network approval.
 
 The task session owns the current source, opaque evidence handle, and append-only versioned manifest. The handle MUST NOT be a filesystem path, URL credential, shell command, or reusable cross-task cache key.
 
@@ -234,7 +239,7 @@ parse and validate
 → immutable evidence bundle
 ```
 
-`transcript` detail with usable captions and no cues MAY finish without a media download. Visual preparation occurs only when the chosen mode or a valid cue needs it. Caption parsing failure is non-fatal; the resulting route and limitation MUST be visible.
+Any `decision_required` or `consent_required` outcome pauses this order. A resumed call MUST validate the supplied run-scoped selection against its original choice kind before doing further work. `transcript` detail with usable captions and no cues MAY finish without a media download. Visual preparation occurs only when the chosen mode or a valid cue needs it. Caption parsing failure is non-fatal; the resulting route and limitation MUST be visible.
 
 All tool adapters are typed composition-root dependencies. They MUST invoke executables with an executable plus argument array, consume structured output where available, and never construct a shell string. `yt-dlp` MUST use `--ignore-config` so a user/global configuration cannot inject authentication, paths, proxying, or download behavior. The report MUST include relevant executable/provider/model versions without exposing secrets.
 
@@ -242,7 +247,7 @@ All tool adapters are typed composition-root dependencies. They MUST invoke exec
 
 Before the first source-host request, disclose that `yt-dlp` will contact the named public host and request the host's command-network approval. Before dependent work, preflight `yt-dlp`, `ffmpeg`, and `ffprobe` executables. Also report whether `yt-dlp` has a usable EJS/JavaScript runtime for current YouTube support. A missing tool yields typed guidance; the skill MUST NOT autonomously install or update it. Caption-only work MAY proceed without media post-processing only if the missing tool is not needed.
 
-For an eligible public URL, metadata and bounded subtitle availability are checked before media download. The downloader MUST inspect manual and automatic caption availability, exclude `live_chat`, and use a bounded request. It records every available track's sanitized run-scoped ID, language, type, and format. It selects a valid explicit `caption_track` ID, or the sole usable track; otherwise, when transcript evidence is needed, it returns `decision_required` before selecting/downloading a caption or producing transcript claims. It MAY continue a visual-only route that explicitly reports transcript coverage as `none`. The runtime MUST NOT default to English, translate, or infer a preference from metadata.
+For an eligible public URL, metadata and bounded subtitle availability are checked before media download. The downloader MUST inspect manual and automatic caption availability, exclude `live_chat`, and use a bounded request. It records every available track's sanitized run-scoped ID, language, type, and format. It selects a valid explicit `caption_track` ID, or the sole usable track; otherwise, when transcript evidence is needed, it returns `decision_required` before selecting/downloading a caption or producing transcript claims. It MAY continue a visual-only route that explicitly reports transcript coverage as `none`; that route MUST NOT make transcript claims without a valid selection and usable transcript evidence. The runtime MUST NOT default to English, translate, or infer a preference from metadata.
 
 The selected transcript records whether it was manual captions, automatic captions, OpenAI Whisper, Groq Whisper, or none. Normalize it into ordered segments with text, start/end times, language, and provenance; strip markup and collapse rolling duplicate/extended cues while retaining absolute source times. Do not automatically discover local sidecar subtitles.
 
@@ -286,13 +291,13 @@ v0.1 supports only:
 - OpenAI `whisper-1`, when timestamped segments are required; and
 - Groq `whisper-large-v3`.
 
-There is no default provider, no persistent opt-in, and no silent cross-provider fallback. If exactly one supported credential is available and the user chooses transcription, offer that provider. If both are available, ask the user to select one. If none is available, return captions-only or frames-only evidence and setup guidance.
+There is no default provider, audio-upload consent is fresh for every watch request, and there is no silent cross-provider fallback. When captions are absent/unusable and transcription may help, the task MUST explicitly ask whether to continue. Its `choice_kind: transcription` choices MUST include a no-transcription route, and every affirmative choice MUST name exactly one listed provider and model. With one eligible provider, the prompt names that provider rather than treating credential availability as selection. With multiple eligible providers, it lists separate sanitized, run-scoped choices and requires the user to select one. The task and runtime MUST NOT infer a provider, use a default, or treat the presence of a credential as provider selection or consent. If none is available, return captions-only or frames-only evidence and setup guidance.
 
 Credentials may come only from an external key manager or environment variables `OPENAI_API_KEY` and `GROQ_API_KEY`, read at call time. The skill MUST NOT request secrets in chat, accept a secret value as a control, scan/read `.env`, persist a secret, print it, place it in arguments/filenames/URLs/reports, or probe one provider’s key after another fails. It MUST NOT revoke or delete a credential.
 
 ### 8.2 Just-in-time consent
 
-Native captions are always preferred. When captions are absent/unusable and transcription could help, the runtime first inventories audio tracks with `ffprobe`. It selects a valid explicit `audio_track` ID or the sole usable audio track. Multiple tracks without an explicit selection return `decision_required`; media with no audio proceeds without transcription. Only after a track is selected does the runtime return `consent_required`, before extracting audio or making a provider request.
+Native captions are always preferred. When captions are absent/unusable and transcription could help, the task first obtains the explicit transcription/provider decision required by section 8.1. Only after the user selects a named provider may the runtime continue to inventory audio tracks with `ffprobe`. It selects a valid explicit `audio_track` ID or the sole usable audio track. Multiple tracks without an explicit selection return `decision_required`; media with no audio proceeds without transcription. Only after both provider and track are selected does the runtime return `consent_required`, before extracting audio or making a provider request. The provider selection, fresh provider-specific consent, and separate host command-network approval are three distinct requirements; none implies either of the others.
 
 The consent prompt MUST name:
 
@@ -314,7 +319,7 @@ Provider documentation, model availability, retention wording, and plan limits a
 
 ## 9. Failures, cancellation, and truthful outcomes
 
-The runtime must expose a terminal state, stage, category, attempts, and retained evidence/disposal state. It MUST distinguish:
+Every runtime outcome MUST expose its state and whether it is terminal. Terminal stop, failure, and cancellation outcomes also expose the applicable stage, category, attempts, and retained evidence/disposal state. They MUST distinguish:
 
 - invalid request or unsupported source;
 - missing preflight dependency;
@@ -415,30 +420,30 @@ The implementation is release-ready only when every H, S, D, P, and L-01 row pas
 
 The release record MUST name intentional deviations from the parity snapshot (including 768 px ordinary JPEG frames and eight-frame chronology batches) and their calibration evidence. Live behavior, current provider terms, extractor compatibility, account entitlement, and Desktop discovery must be recorded as live evidence, not inferred from static checks.
 
-## 14. Implementation-ready checklist and approval gate
+## 14. Implementation-ready checklist and satisfied approval gate
 
 ### 14.1 Approved caption-language and audio-track policy
 
 The resolved record did not specify a selection algorithm, so this specification adopts the human-approved conservative policy: honor a valid explicit track selection; automatically select only when exactly one usable native caption/audio track exists; otherwise return `decision_required` and ask the user to choose. Never infer from title/uploader, auto-translate, or silently use a first/default track.
 
-The `decision_required` response lists only sanitized run-scoped IDs and metadata. It retains the current source and performs no caption download, audio extraction, provider upload, or answer that implies a selected language/track. A visual-only route may continue only when it reports transcript coverage as `none`.
+The `decision_required` response and every follow-up selection MUST satisfy the sanitized-choice, same-task-state, and no-action invariants in sections 4.3 and 6.1. A visual-only route may continue only when it reports transcript coverage as `none` and makes no transcript claim without a valid selection and usable transcript evidence.
 
 ### 14.2 Approval checklist
 
-Before implementation begins, a reviewer must be able to answer “yes” to each item:
+The human approval recorded in [#13](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/13#issuecomment-5252219003) satisfied this checklist:
 
-- [ ] The exact supported source, trigger, controls, and invalid-request behavior are defined.
-- [ ] The evidence streams, timestamp citations, coverage, answerability, outcomes, and cancellation rules are defined.
-- [ ] The deep runtime boundary, fixed stage order, typed adapters, and same-task reuse boundary are defined.
+- [x] The exact supported source, trigger, controls, and invalid-request behavior are defined.
+- [x] The evidence streams, timestamp citations, coverage, answerability, outcomes, and cancellation rules are defined.
+- [x] The deep runtime boundary, fixed stage order, typed adapters, and same-task reuse boundary are defined.
 - [x] Caption-language and audio-track selection follows the approved conservative policy in section 14.1.
-- [ ] Caption, visual, transcription, consent, credential, retry, and partial-coverage policies are defined.
-- [ ] Workspace ownership, retention, and explicit safe cleanup are defined.
-- [ ] Canonical package tree, manual installation/update behavior, and discovery constraints are defined.
-- [ ] Required companion documents, provenance, and third-party notices are defined.
-- [ ] Every required acceptance row and the non-waivable release rule are defined.
-- [ ] No private/authenticated-media, installation, credential, upload, or cleanup authority is implied by invocation alone.
+- [x] Caption, visual, transcription, consent, credential, retry, and partial-coverage policies are defined.
+- [x] Workspace ownership, retention, and explicit safe cleanup are defined.
+- [x] Canonical package tree, manual installation/update behavior, and discovery constraints are defined.
+- [x] Required companion documents, provenance, and third-party notices are defined.
+- [x] Every required acceptance row and the non-waivable release rule are defined.
+- [x] No private/authenticated-media, installation, credential, upload, or cleanup authority is implied by invocation alone.
 
-When the human approves this document in [#13](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/13), it becomes the **implementation-ready specification**. The implementation ticket may then begin from this document; it must not reopen settled product/safety/packaging decisions unless a new explicit decision record supersedes them.
+The human approved this document in the [#13 resolution](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/13#issuecomment-5252219003), satisfying the gate and making it the **implementation-ready specification**. Implementation begins from this document; it must not reopen settled product/safety/packaging decisions unless a new explicit decision record supersedes them.
 
 ## Appendix A — parity requirements incorporated by reference
 
