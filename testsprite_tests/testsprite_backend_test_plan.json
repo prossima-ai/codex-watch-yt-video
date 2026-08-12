@@ -1,0 +1,47 @@
+[
+  {
+    "id": "TC001",
+    "title": "postpreparemetadatawithvalidsinglesource",
+    "description": "Verify that POST /prepare-metadata accepts exactly one supported source with optional question and returns a 200 response containing a validated EvidenceOutcome with current source established, without performing later caption, visual, transcription, workspace, or cleanup stages."
+  },
+  {
+    "id": "TC002",
+    "title": "postpreparemetadatawithinvalidmultiplesourcesorunsupportedinput",
+    "description": "Verify that POST /prepare-metadata with multiple sources, playlist URL, unsupported, private, or live source returns a non-200 failure or stopped outcome indicating invalid or unsupported request, and no later acquisition, caption, visual, or transcription stages are performed."
+  },
+  {
+    "id": "TC003",
+    "title": "postpreparemetadatawithmetadatatoolpreflight",
+    "description": "Verify that POST /prepare-metadata with a supported source returns 200 with a partial typed EvidenceOutcome containing evidence, tools, javascript_support, warnings, coverage, and report_markdown. Assert the implemented field names; do not expect tool_preflight or escaped_markdown_report aliases."
+  },
+  {
+    "id": "TC004",
+    "title": "postpreparemetadatawithmissingrequiredlocaltools",
+    "description": "Verify that POST /prepare-metadata with a supported local source and X-TestSprite-Simulate-Missing-Tool: ffprobe returns a typed failed missing_dependency outcome with guidance, zero attempts, and no evidence. The test-only adapter header simulates the condition without changing host tools."
+  },
+  {
+    "id": "TC005",
+    "title": "postpreparemetadatawithvalidcontrols",
+    "description": "Verify that POST /prepare-metadata with valid controls within the one-second fixture returns 200 with numeric controls.focus_start_seconds, controls.focus_end_seconds, and controls.cues_seconds, plus metadata-only evidence. Do not expect focus/cues aliases or later-stage timestamp evidence."
+  },
+  {
+    "id": "TC006",
+    "title": "postpreparemetadatawithinvalidcontrols",
+    "description": "Verify that POST /prepare-metadata with invalid detail value, malformed timestamp, negative cue, non-positive max_frames, or stale caption/audio track ID returns failed or decision_required outcome describing the specific invalid control, with no selection guessed and no later acquisition begun."
+  },
+  {
+    "id": "TC007",
+    "title": "postpreparemetadatawithexplicitcaptionoraudiotrackselection",
+    "description": "Verify that POST /prepare-metadata with a valid explicit caption_track or audio_track ID returns 200 with selected track reflected in the typed outcome and sanitized run-scoped metadata, continuing processing only for the approved track kind within the same task."
+  },
+  {
+    "id": "TC008",
+    "title": "postpreparemetadatawithmultipleusabletracksandnoselection",
+    "description": "Verify that POST /prepare-metadata with multiple usable caption or audio tracks and no explicit selection returns a decision_required outcome listing sanitized choices for the requested track kind, requiring client follow-up selection before any new acquisition, extraction, or upload."
+  },
+  {
+    "id": "TC009",
+    "title": "gethealthadapterstatuscheck",
+    "description": "Verify that GET /health returns 200 with adapter status object confirming the test-only adapter availability and readiness, without exercising product behavior."
+  }
+]
