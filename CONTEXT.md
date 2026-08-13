@@ -56,6 +56,18 @@ _Avoid_: Screenshot request, frame marker
 One of the distinct sources from which an answer may draw claims: visual evidence, transcript evidence, or source metadata. Evidence streams may be synthesized but never silently conflated.
 _Avoid_: Modality, data source
 
+**Visual observation**:
+A plain description of what the host actually saw in one selected frame, recorded only after inspection and bound to that frame's chronological position. It does not carry a caller-written timestamp or become evidence for another frame.
+_Avoid_: Visual inference, frame caption, image guess
+
+**Grounded claim**:
+One material user-facing finding whose evidence references resolve to inspected metadata, Raw transcript segments, or visual observations. Its stream labels and source-absolute citations are derived from that evidence.
+_Avoid_: Draft claim, answer sentence, model assertion
+
+**Evidence reference**:
+A structural identity for one metadata field, Raw transcript segment position, or visual observation. It carries no caller-written timestamp, provenance, selection reason, or artifact path.
+_Avoid_: Citation string, source link, evidence pointer
+
 **Raw transcript**:
 The normalized, timestamped source text derived from captions or an optional transcription provider, not the original VTT, provider response, or unprocessed rolling-caption cues.
 _Avoid_: Caption file, provider JSON, verbatim transcript
