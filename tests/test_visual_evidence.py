@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -46,10 +47,21 @@ class RecordingMediaRunner:
         self.source_width = source_width
         self.source_height = source_height
         self.invocations: list[tuple[str, list[str]]] = []
+        self.stream_bindings: list[tuple[str, list[str], bool, bool]] = []
 
-    def run(self, executable: str, arguments: object) -> CommandResult:
+    def run(
+        self,
+        executable: str,
+        arguments: object,
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
         args = list(arguments)
         self.invocations.append((executable, args))
+        self.stream_bindings.append(
+            (executable, args, input_fd is not None, output_fd is not None)
+        )
         if "-version" in args or "--version" in args:
             return CommandResult(0, f"{Path(executable).name} version fixture\n", "")
         if "--verbose" in args:
@@ -71,12 +83,11 @@ class RecordingMediaRunner:
                 ),
                 "",
             )
-        if "--print" in args:
-            output_template = args[args.index("--output") + 1]
-            output = Path(output_template.replace("%(ext)s", "mp4"))
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"synthetic-media")
-            return CommandResult(0, f"{output}\n", "")
+        if "--format" in args and "--output" in args:
+            if args[args.index("--output") + 1] != "-" or output_fd is None:
+                raise OSError("Fixture media download did not use its output stream.")
+            self._write_output_fd(output_fd, b"synthetic-media")
+            return CommandResult(0, "", "")
         if "-show_format" in args:
             return CommandResult(
                 0,
@@ -114,10 +125,10 @@ class RecordingMediaRunner:
                 "",
             )
         if "-show_entries" in args:
-            if str(args[-1]).endswith(".jpg"):
+            if self._descriptor_contains(input_fd, b"synthetic-jpeg"):
                 width, height = (
                     (1024, 576)
-                    if str(args[-1]).endswith("-detail.jpg")
+                    if b"detail" in self._descriptor_bytes(input_fd)
                     else (768, 432)
                 )
                 codec_name = "mjpeg"
@@ -163,19 +174,50 @@ class RecordingMediaRunner:
                 ),
             )
         if "-frames:v" in args:
-            output = Path(args[-1])
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"synthetic-jpeg")
+            if args[-1] != "pipe:1" or output_fd is None:
+                raise OSError("Fixture frame extraction did not use its output stream.")
+            payload = (
+                b"synthetic-jpeg-detail"
+                if any("min(1024," in argument for argument in args)
+                else b"synthetic-jpeg"
+            )
+            self._write_output_fd(output_fd, payload)
             return CommandResult(0, "", "")
         return CommandResult(0, "", "")
 
+    @staticmethod
+    def _write_output_fd(output_fd: int, payload: bytes) -> None:
+        try:
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(output_fd, payload[offset:])
+        except OSError as error:
+            raise OSError("Fixture could not write to the runtime-owned output stream.") from error
+
+    @staticmethod
+    def _descriptor_bytes(input_fd: int | None) -> bytes:
+        if input_fd is None:
+            return b""
+        return os.pread(input_fd, 1024, 0)
+
+    @classmethod
+    def _descriptor_contains(cls, input_fd: int | None, expected: bytes) -> bool:
+        return expected in cls._descriptor_bytes(input_fd)
+
 
 class FailingSceneRunner(RecordingMediaRunner):
-    def run(self, executable: str, arguments: object) -> CommandResult:
+    def run(
+        self,
+        executable: str,
+        arguments: object,
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
         args = list(arguments)
         if "null" in args:
             raise OSError("synthetic frame selector failure")
-        return super().run(executable, args)
+        return super().run(executable, args, input_fd=input_fd, output_fd=output_fd)
 
 
 class InspectAllFrames:
@@ -273,7 +315,7 @@ with Path(os.environ["WATCH_COMMAND_LOG"]).open("a", encoding="utf-8") as log:
 
 if "-version" in sys.argv:
     print("ffprobe version 7.1")
-elif sys.argv[-1].endswith(".jpg"):
+elif sys.argv[-1].startswith("/dev/fd/") and b"synthetic-jpeg" in Path(sys.argv[-1]).read_bytes():
     print(json.dumps({"streams": [
         {"codec_name": "mjpeg", "width": 768, "height": 432, "sample_aspect_ratio": "1:1"},
     ]}))
@@ -318,13 +360,13 @@ elif "framemd5" in sys.argv:
 elif "null" in sys.argv:
     for timestamp in json.loads(os.environ["WATCH_SCENE_TIMES"]):
         print(f"[Parsed_showinfo_0] pts_time:{timestamp:.6f}", file=sys.stderr)
+elif sys.argv[-1] == "pipe:1":
+    sys.stdout.buffer.write(b"synthetic-jpeg")
 elif sys.argv[-1].startswith("-"):
     # A capability probe has no output path and must not create an option-named file.
     pass
 else:
-    output = Path(sys.argv[-1])
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(b"synthetic-jpeg")
+    raise SystemExit(f"unexpected named output: {sys.argv[-1]}")
 """,
         )
         environment = os.environ.copy()
@@ -347,6 +389,60 @@ else:
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)
+
+    def test_visual_session_reuses_handle_and_accepts_explicit_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "video.mp4"
+            source.write_bytes(b"synthetic fixture")
+            environment, command_log = self.configure_fake_media_tools(root)
+            session = subprocess.Popen(
+                [sys.executable, "-B", str(PREPARE_VISUAL), "--session"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            assert session.stdin is not None
+            assert session.stdout is not None
+            try:
+                session.stdin.write(
+                    json.dumps({"sources": [str(source)], "detail": "transcript"})
+                    + "\n"
+                )
+                session.stdin.flush()
+                initial = json.loads(session.stdout.readline())
+                invocations_before_reuse = command_log.read_text(encoding="utf-8")
+                session.stdin.write(
+                    json.dumps(
+                        {
+                            "sources": [str(source)],
+                            "question": "What was retained?",
+                            "prior_evidence": {
+                                "evidence_handle": initial["evidence_handle"]
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                session.stdin.flush()
+                reused = json.loads(session.stdout.readline())
+                session.stdin.write(json.dumps({"cleanup": "current"}) + "\n")
+                session.stdin.flush()
+                cleaned = json.loads(session.stdout.readline())
+            finally:
+                session.stdin.close()
+                self.assertEqual(session.wait(timeout=5), 0, session.stderr.read())
+                session.stdout.close()
+                if session.stderr is not None:
+                    session.stderr.close()
+            invocations_after_cleanup = command_log.read_text(encoding="utf-8")
+
+        self.assertTrue(initial["evidence_handle"].startswith("evidence_"))
+        self.assertEqual(reused["evidence_handle"], initial["evidence_handle"])
+        self.assertEqual(invocations_after_cleanup, invocations_before_reuse)
+        self.assertEqual(cleaned["state"], "cleanup_incomplete")
 
     def test_focused_visual_request_returns_timestamped_frames_for_host_inspection(
         self,
@@ -402,7 +498,7 @@ else:
             extraction_calls = [
                 args
                 for args in invocations
-                if args[-1].endswith(".jpg") and "-frames:v" in args
+                if args[-1] == "pipe:1" and "-frames:v" in args
             ]
             self.assertEqual(len(extraction_calls), len(frames))
             self.assertTrue(
@@ -412,6 +508,8 @@ else:
                         and "setsar=1" in argument
                         for argument in args
                     )
+                    and args[args.index("-f") + 1] == "image2pipe"
+                    and args[args.index("-c:v") + 1] == "mjpeg"
                     for args in extraction_calls
                 )
             )
@@ -1120,7 +1218,7 @@ else:
             all(geometry["sample_aspect_ratio"] == "1:1" for geometry in frame_geometries)
         )
 
-    def test_approved_public_source_downloads_to_a_controlled_path_without_cookie_flags(
+    def test_approved_public_source_streams_to_a_controlled_descriptor_without_cookie_flags(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1139,7 +1237,9 @@ else:
 
         visual = outcome.evidence.visual  # type: ignore[union-attr]
         download = next(
-            args for executable, args in runner.invocations if executable == "yt-dlp" and "--print" in args
+            args
+            for executable, args in runner.invocations
+            if executable == "yt-dlp" and "--format" in args
         )
         self.assertTrue(visual.frames)
         self.assertEqual(download[-2:], ["--", source])
@@ -1151,10 +1251,31 @@ else:
         self.assertIn("--no-remote-components", download)
         self.assertNotIn("--cookies", download)
         self.assertNotIn("--cookies-from-browser", download)
-        output_template = Path(download[download.index("--output") + 1])
-        self.assertTrue(
-            str(output_template).startswith(str((root / "artifacts").resolve())),
-            output_template,
+        self.assertNotIn("--print", download)
+        self.assertEqual(
+            download[download.index("--output") + 1], "-"
+        )
+        download_binding = next(
+            binding
+            for binding in runner.stream_bindings
+            if binding[0] == "yt-dlp" and "--format" in binding[1]
+        )
+        self.assertFalse(download_binding[2])
+        self.assertTrue(download_binding[3])
+        # The successful run through this strict fixture also proves the runtime
+        # did not try to provide a workspace current-working-directory descriptor.
+        self.assertNotIn(
+            "working_directory_fd", inspect.signature(runner.run).parameters
+        )
+        retained_media_reads = [
+            binding
+            for binding in runner.stream_bindings
+            if any(argument.startswith("/dev/fd/") for argument in binding[1])
+        ]
+        self.assertTrue(retained_media_reads)
+        self.assertTrue(all(binding[2] for binding in retained_media_reads))
+        self.assertFalse(
+            any("source.media" in arguments for _, arguments, _, _ in runner.stream_bindings)
         )
 
     def test_output_dir_does_not_grant_visual_artifact_write_authority(self) -> None:

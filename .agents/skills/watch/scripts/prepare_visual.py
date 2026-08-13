@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import sys
-from typing import Any
 
 sys.dont_write_bytecode = True
 
 from watch_evidence import WatchEvidenceRuntime
+from watch_runtime_cli import outcome_from_json, session_main, write_outcome
 
 
 def main() -> int:
-    runtime = WatchEvidenceRuntime()
+    session_mode = sys.argv[1:] == ["--session"]
+    runtime = WatchEvidenceRuntime(reuse_enabled=session_mode)
     try:
-        request: Any = json.load(sys.stdin)
-    except (json.JSONDecodeError, UnicodeError):
-        outcome = runtime.invalid_input(
-            "invalid_json", "Standard input must contain one valid JSON object."
-        )
-    else:
-        outcome = runtime.prepare(request)
-    json.dump(outcome.to_dict(), sys.stdout, ensure_ascii=True, sort_keys=True)
-    sys.stdout.write("\n")
-    return 0
+        if session_mode:
+            return session_main(runtime)
+        if len(sys.argv) != 1:
+            sys.stderr.write("Usage: prepare_visual.py [--session]\n")
+            return 2
+        write_outcome(outcome_from_json(runtime, sys.stdin.read()))
+        return 0
+    finally:
+        runtime.close()
 
 
 if __name__ == "__main__":
