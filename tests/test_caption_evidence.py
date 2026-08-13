@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -23,8 +24,17 @@ class CaptionRunner:
         self.metadata = metadata
         self.caption_bodies = caption_bodies
         self.invocations: list[tuple[str, list[str]]] = []
+        self.caption_fetches: list[str] = []
 
-    def run(self, executable: str, arguments: Sequence[str]) -> CommandResult:
+    def run(
+        self,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
+        del input_fd, output_fd
         copied_arguments = list(arguments)
         self.invocations.append((executable, copied_arguments))
         if "--version" in copied_arguments or "-version" in copied_arguments:
@@ -34,31 +44,40 @@ class CaptionRunner:
         if "--dump-single-json" in copied_arguments:
             return CommandResult(0, json.dumps(self.metadata), "")
 
-        kind = (
-            "manual"
-            if "--write-subs" in copied_arguments
-            else "automatic"
-            if "--write-auto-subs" in copied_arguments
-            else None
-        )
-        if kind is None:
-            return CommandResult(1, "", "Unexpected command")
-        language = copied_arguments[copied_arguments.index("--sub-langs") + 1]
-        caption_format = copied_arguments[copied_arguments.index("--sub-format") + 1]
-        output_template = copied_arguments[copied_arguments.index("--output") + 1]
-        caption_path = Path(output_template.replace("%(ext)s", caption_format))
-        caption_body = self.caption_bodies.get(f"{kind}:{language}:{caption_format}")
-        if caption_body is None:
-            caption_body = self.caption_bodies[f"{kind}:{language}"]
-        caption_path.write_text(caption_body, encoding="utf-8")
-        return CommandResult(0, "", "")
+        return CommandResult(1, "", "Unexpected command")
 
-    def caption_invocations(self) -> list[list[str]]:
-        return [
-            arguments
-            for _, arguments in self.invocations
-            if "--write-subs" in arguments or "--write-auto-subs" in arguments
-        ]
+    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None:
+        catalogues = (
+            ("manual", self.metadata.get("subtitles")),
+            ("automatic", self.metadata.get("automatic_captions")),
+        )
+        for caption_type, catalogue in catalogues:
+            if not isinstance(catalogue, dict):
+                continue
+            for language, entries in catalogue.items():
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict) or entry.get("url") != url:
+                        continue
+                    caption_format = entry["ext"]
+                    caption_body = self.caption_bodies.get(
+                        f"{caption_type}:{language}:{caption_format}"
+                    )
+                    if caption_body is None:
+                        caption_body = self.caption_bodies[f"{caption_type}:{language}"]
+                    payload = caption_body.encode("utf-8")
+                    if len(payload) > max_bytes:
+                        raise OSError("Fixture caption exceeds the safe limit.")
+                    while payload:
+                        written = os.write(output_fd, payload)
+                        payload = payload[written:]
+                    self.caption_fetches.append(url)
+                    return
+        raise OSError("Unexpected caption URL")
+
+    def caption_invocations(self) -> list[str]:
+        return self.caption_fetches
 
 
 def fake_executable(name: str) -> str:
@@ -93,7 +112,11 @@ class CaptionEvidenceTests(unittest.TestCase):
     ) -> tuple[WatchEvidenceRuntime, CaptionRunner]:
         runner = CaptionRunner(metadata, caption_bodies)
         return (
-            WatchEvidenceRuntime(command_runner=runner, find_executable=fake_executable),
+            WatchEvidenceRuntime(
+                command_runner=runner,
+                caption_fetcher=runner,
+                find_executable=fake_executable,
+            ),
             runner,
         )
 
@@ -241,15 +264,80 @@ Hello &amp; welcome everyone
         )
         caption_calls = runner.caption_invocations()
         self.assertEqual(len(caption_calls), 1)
-        self.assertIn("--skip-download", caption_calls[0])
-        self.assertIn("--write-subs", caption_calls[0])
-        self.assertNotIn("--write-auto-subs", caption_calls[0])
-        self.assertEqual(
-            caption_calls[0][caption_calls[0].index("--sub-langs") + 1], "en"
+        self.assertEqual(caption_calls, ["https://cdn.example/manual.vtt"])
+        self.assertNotIn("cdn.example", outcome.report_markdown)
+
+    def test_replaying_a_completed_caption_choice_reuses_its_terminal_evidence(self) -> None:
+        runtime, runner = self.make_runtime(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]},
+                automatic_captions={
+                    "fr": [{"ext": "vtt", "url": "https://cdn.example/automatic.vtt"}]
+                },
+            ),
+            {
+                "manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nManual caption\n",
+                "automatic:fr": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nAutomatic caption\n",
+            },
         )
-        self.assertEqual(
-            caption_calls[0][caption_calls[0].index("--sub-format") + 1], "vtt"
+        decision = runtime.prepare(self.request())
+        choice = next(choice for choice in decision.choices if choice.caption_type == "manual")
+        completed = runtime.prepare(
+            self.request(caption_track=choice.id), prior_evidence=decision
         )
+        invocations_before_replay = list(runner.invocations)
+        fetches_before_replay = list(runner.caption_fetches)
+
+        replayed = runtime.prepare(
+            self.request(question="What did the retained transcript establish?"),
+            prior_evidence={"evidence_handle": completed.evidence_handle},
+        )
+
+        self.assertEqual(replayed, completed)
+        self.assertEqual(runner.invocations, invocations_before_replay)
+        self.assertEqual(runner.caption_fetches, fetches_before_replay)
+
+    def test_caption_retrieval_urls_remain_internal_to_the_runtime(self) -> None:
+        caption_url = "https://cdn.example/private.vtt?signature=caption-secret"
+        runtime, runner = self.make_runtime(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": caption_url}]},
+                duration=1.0,
+            ),
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+
+        outcome = runtime.prepare(self.request())
+        serialized_outcome = json.dumps(outcome.to_dict(), sort_keys=True)
+
+        self.assertEqual(runner.caption_fetches, [caption_url])
+        self.assertNotIn("cdn.example", serialized_outcome)
+        self.assertNotIn("caption-secret", serialized_outcome)
+        self.assertNotIn("cdn.example", outcome.report_markdown)
+
+    def test_ambiguous_same_format_caption_urls_are_not_silently_fetched(self) -> None:
+        runtime, runner = self.make_runtime(
+            captioned_metadata(
+                subtitles={
+                    "en": [
+                        {"ext": "vtt", "url": "https://cdn.example/one.vtt"},
+                        {"ext": "vtt", "url": "https://cdn.example/two.vtt"},
+                    ]
+                }
+            ),
+            {},
+        )
+
+        outcome = runtime.prepare(self.request())
+        serialized_outcome = json.dumps(outcome.to_dict(), sort_keys=True)
+
+        self.assertEqual(outcome.state, "partial")
+        self.assertTrue(outcome.terminal)
+        self.assertEqual(runner.caption_fetches, [])
+        self.assertEqual(outcome.choices, ())
+        self.assertEqual(len(outcome.caption_inventory), 1)
+        self.assertFalse(outcome.caption_inventory[0].usable)
+        self.assertNotIn("cdn.example", serialized_outcome)
 
     def test_sole_automatic_track_finishes_transcript_detail_without_media_download(self) -> None:
         runtime, runner = self.make_runtime(
@@ -282,9 +370,7 @@ Automatic caption text
         self.assertNotIn("Automatic caption text", outcome.report_markdown)
         caption_calls = runner.caption_invocations()
         self.assertEqual(len(caption_calls), 1)
-        self.assertIn("--skip-download", caption_calls[0])
-        self.assertIn("--write-auto-subs", caption_calls[0])
-        self.assertNotIn("--write-subs", caption_calls[0])
+        self.assertEqual(caption_calls, ["https://cdn.example/automatic.vtt"])
 
         runner.invocations.clear()
         reused_inventory_id = outcome.caption_inventory[0].id
@@ -323,9 +409,7 @@ Automatic caption text
         )
         caption_calls = runner.caption_invocations()
         self.assertEqual(len(caption_calls), 1)
-        self.assertEqual(
-            caption_calls[0][caption_calls[0].index("--sub-format") + 1], "vtt"
-        )
+        self.assertEqual(caption_calls, ["https://cdn.example/manual.vtt"])
 
     def test_ttml_and_vtt_tracks_require_choice_and_selected_ttml_normalizes(self) -> None:
         runtime, runner = self.make_runtime(
@@ -372,11 +456,7 @@ Automatic caption text
         self.assertIn("format `ttml`", outcome.report_markdown)
         caption_calls = runner.caption_invocations()
         self.assertEqual(len(caption_calls), 1)
-        self.assertIn("--write-subs", caption_calls[0])
-        self.assertIn("--skip-download", caption_calls[0])
-        self.assertEqual(
-            caption_calls[0][caption_calls[0].index("--sub-format") + 1], "ttml"
-        )
+        self.assertEqual(caption_calls, ["https://cdn.example/manual.ttml"])
 
     def test_ttml_normalizes_nested_text_and_inherited_media_timing(self) -> None:
         runtime, _ = self.make_runtime(
@@ -509,10 +589,7 @@ Automatic caption text
         )
         caption_calls = runner.caption_invocations()
         self.assertEqual(len(caption_calls), 1)
-        self.assertIn("--write-auto-subs", caption_calls[0])
-        self.assertEqual(
-            caption_calls[0][caption_calls[0].index("--sub-format") + 1], "ttml"
-        )
+        self.assertEqual(caption_calls, ["https://cdn.example/automatic.ttml"])
 
     def test_unsafe_ttml_is_a_truthful_partial_result(self) -> None:
         runtime, _ = self.make_runtime(

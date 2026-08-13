@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
+import fcntl
+import hashlib
 import html
 import ipaddress
 import json
@@ -11,10 +13,13 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TypeGuard
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TextIO, TypeGuard
 from urllib.parse import urlsplit
+from urllib import error as urlerror
+from urllib import request as urlrequest
 import xml.etree.ElementTree as ET
 
 
@@ -30,7 +35,7 @@ OutcomeState = Literal[
     "canceled",
 ]
 SourceKind = Literal["local", "url"]
-EvidenceStage = Literal["validation", "preflight", "metadata"]
+EvidenceStage = Literal["validation", "preflight", "metadata", "workspace", "reuse"]
 ChoiceKind = Literal["caption_track", "audio_track", "transcription"]
 CaptionType = Literal["manual", "automatic"]
 TranscriptProvenance = Literal["manual_captions", "automatic_captions"]
@@ -59,9 +64,28 @@ FailureCategory = Literal[
     "metadata_probe",
     "unsupported_playlist",
     "unsupported_live_source",
+    "invalid_evidence_handle",
+    "evidence_disposed",
+    "reuse_requires_approval",
+    "workspace_creation",
 ]
-DisposalState = Literal["not_created"]
-ReuseState = Literal["none", "current_source_only"]
+DisposalState = Literal[
+    "not_created",
+    "retained",
+    "cleanup_succeeded",
+    "cleanup_already_absent",
+    "cleanup_deferred",
+    "cleanup_refused",
+    "cleanup_incomplete",
+]
+ReuseState = Literal["none", "current_source_only", "same_task_evidence", "revoked"]
+CleanupState = Literal[
+    "cleanup_succeeded",
+    "cleanup_already_absent",
+    "cleanup_deferred",
+    "cleanup_refused",
+    "cleanup_incomplete",
+]
 JavaScriptSupportStatus = Literal["available", "unavailable", "unknown", "not_checked"]
 DetailMode = Literal["transcript", "efficient", "balanced", "token-burner"]
 FrameSelectionReason = Literal[
@@ -257,6 +281,11 @@ class EvidenceOutcome:
     choices: tuple[CaptionChoice, ...] = ()
     caption_inventory: tuple[CaptionInventoryItem, ...] = ()
     decision_handle: str | None = None
+    workspace_id: str | None = None
+    evidence_handle: str | None = None
+    disposition: EvidenceDisposition = field(
+        default_factory=lambda: EvidenceDisposition(False, "not_created", "none")
+    )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -264,6 +293,23 @@ class EvidenceOutcome:
         if isinstance(failure, dict):
             disposition = failure.pop("disposition")
             failure.update(disposition)
+        disposition = payload.pop("disposition")
+        payload.update(disposition)
+        return payload
+
+
+@dataclass(frozen=True)
+class CleanupOutcome:
+    state: CleanupState
+    workspace_id: str | None
+    message: str
+    disposition: EvidenceDisposition
+    report_markdown: str
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        disposition = payload.pop("disposition")
+        payload.update(disposition)
         return payload
 
 
@@ -275,6 +321,28 @@ JAVASCRIPT_NOT_CHECKED = JavaScriptSupport("not_checked", None)
 MAX_CAPTION_BYTES = 4 * 1024 * 1024
 SUPPORTED_CAPTION_FORMATS = frozenset({"ttml", "vtt"})
 CAPTION_FORMAT_PREFERENCE = ("vtt", "ttml")
+WORKSPACE_SCHEMA = "codex-watch-workspace"
+WORKSPACE_MANIFEST_VERSION = 1
+WORKSPACE_MARKER_NAME = ".codex-watch-workspace.json"
+WORKSPACE_MANIFEST_NAME = ".codex-watch-manifest.jsonl"
+WORKSPACE_LOCK_NAME = ".codex-watch.lock"
+RUNTIME_ROOT_DIRECTORY_NAME = "codex-watch-runtime"
+RUNTIME_ROOT_SCHEMA = "codex-watch-runtime-root"
+RUNTIME_ROOT_VERSION = 1
+RUNTIME_ROOT_MARKER_NAME = ".codex-watch-runtime-root.json"
+WORKSPACE_CONTROL_NAMES = frozenset(
+    {WORKSPACE_MARKER_NAME, WORKSPACE_MANIFEST_NAME, WORKSPACE_LOCK_NAME}
+)
+WORKSPACE_ID_PATTERN = re.compile(r"^workspace_[A-Za-z0-9_-]{20,}$")
+_NOFOLLOW_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_NOFOLLOW_FILE_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
 
 
 @dataclass(frozen=True)
@@ -283,6 +351,7 @@ class _CaptionCandidate:
     caption_type: CaptionType
     format: str
     usable: bool
+    caption_url: str | None
 
 
 @dataclass(frozen=True)
@@ -297,6 +366,7 @@ class _CaptionSelection:
     decision_handle: str
     choice: CaptionChoice
     metadata_probe: _SourceProbe
+    workspace_id: str
 
 
 @dataclass(frozen=True)
@@ -312,8 +382,60 @@ class CommandResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class _ManifestArtifact:
+    path: str
+    kind: str
+    disposition: Literal["retained"]
+    size_bytes: int
+    sha256: str
+
+
+@dataclass
+class _WorkspaceRecord:
+    workspace_id: str
+    path: Path
+    path_identity: tuple[int, int]
+    directory_fd: int | None
+    source: Source | None
+    controls: WatchControls | None
+    evidence_handle: str | None
+    marker_identity: tuple[int, int]
+    manifest_identity: tuple[int, int]
+    marker_digest: str
+    manifest_digest: str
+    lock_digest: str
+    lock_file: TextIO
+    artifacts: dict[str, _ManifestArtifact]
+    outcome: EvidenceOutcome | None = None
+    reuse_eligible: bool = True
+    cleanup_state: CleanupState | None = None
+    deleted_artifacts: set[str] = field(default_factory=set)
+    deleted_controls: set[str] = field(default_factory=set)
+    cleanup_only: bool = False
+
+
+@dataclass(frozen=True)
+class _CleanupRecordLookup:
+    """A resolved cleanup record or an observed competing recovery lock."""
+
+    record: _WorkspaceRecord | None
+    deferred_workspace_id: str | None = None
+
+
 class CommandRunner(Protocol):
-    def run(self, executable: str, arguments: Sequence[str]) -> CommandResult: ...
+    def run(
+        self,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult: ...
+
+
+class CaptionFetcher(Protocol):
+    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -356,35 +478,1536 @@ class _VisualPlan:
     cue_dropped_by_rate_count: int
 
 
+@dataclass(frozen=True)
+class _VisualMedia:
+    """One visual input, optionally retained in a runtime workspace."""
+
+    argument: str
+    workspace: _WorkspaceRecord | None
+
+
 class SubprocessCommandRunner:
-    def run(self, executable: str, arguments: Sequence[str]) -> CommandResult:
+    def run(
+        self,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
+        run_kwargs: dict[str, object] = {}
+        # ``stdout`` is duplicated to descriptor 1 by subprocess itself.  The
+        # child needs only an explicit pass-through descriptor when it reads a
+        # retained workspace artifact through ``/dev/fd/<n>``.
+        inherited_fds = (input_fd,) if input_fd is not None else ()
+        for file_descriptor in inherited_fds:
+            os.fstat(file_descriptor)
+        if inherited_fds:
+            run_kwargs["pass_fds"] = inherited_fds
+        if output_fd is None:
+            run_kwargs["stdout"] = subprocess.PIPE
+        else:
+            run_kwargs["stdout"] = output_fd
+        run_kwargs["stderr"] = subprocess.PIPE
         completed = subprocess.run(
             [executable, *arguments],
             stdin=subprocess.DEVNULL,
-            text=True,
-            capture_output=True,
+            text=False,
             check=False,
             shell=False,
             timeout=30,
+            **run_kwargs,
         )
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+        return CommandResult(
+            completed.returncode,
+            _decode_command_output(completed.stdout),
+            _decode_command_output(completed.stderr),
+        )
+
+
+class UrlCaptionFetcher:
+    """Fetch a selected public caption directly into a caller-owned descriptor."""
+
+    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None:
+        _validate_caption_resource_url(url)
+        opener = urlrequest.build_opener(
+            urlrequest.ProxyHandler({}), _CaptionRedirectHandler()
+        )
+        request = urlrequest.Request(url, headers={"User-Agent": "codex-watch/1"})
+        try:
+            with opener.open(request, timeout=15) as response:
+                _validate_caption_resource_url(response.geturl())
+                total_bytes = 0
+                while True:
+                    chunk = response.read(min(64 * 1024, max_bytes + 1 - total_bytes))
+                    if not chunk:
+                        return
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise OSError("The selected native caption exceeds the safe parsing limit.")
+                    _write_all_bytes(output_fd, chunk)
+        except (urlerror.URLError, TimeoutError) as error:
+            raise OSError("The selected native caption could not be fetched.") from error
+
+
+class _CaptionRedirectHandler(urlrequest.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urlrequest.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: object,
+        new_url: str,
+    ) -> urlrequest.Request | None:
+        _validate_caption_resource_url(new_url)
+        return super().redirect_request(
+            request, file_pointer, code, message, headers, new_url
+        )
 
 
 class WatchEvidenceRuntime:
     def __init__(
         self,
         command_runner: CommandRunner | None = None,
+        caption_fetcher: CaptionFetcher | None = None,
         find_executable: Callable[[str], str | None] = shutil.which,
         frame_inspector: FrameInspector | None = None,
         artifact_root: Path | None = None,
         visual_enabled: bool = True,
+        reuse_enabled: bool = True,
     ) -> None:
         self._command_runner = command_runner or SubprocessCommandRunner()
+        self._caption_fetcher = caption_fetcher or UrlCaptionFetcher()
         self._find_executable = find_executable
         self._frame_inspector = frame_inspector
         self._artifact_root = artifact_root
         self._visual_enabled = visual_enabled
+        self._reuse_enabled = reuse_enabled
         self._caption_selections: dict[str, _CaptionSelection] = {}
+        self._workspace_root: Path | None = None
+        self._workspace_root_identity: tuple[int, int] | None = None
+        self._workspace_root_fd: int | None = None
+        self._workspace_root_marker_identity: tuple[int, int] | None = None
+        self._workspace_root_marker_digest: str | None = None
+        self._workspace_root_is_fixed = False
+        self._workspaces: dict[str, _WorkspaceRecord] = {}
+        self._evidence_handles: dict[str, _WorkspaceRecord] = {}
+        self._retired_evidence_handles: dict[str, _WorkspaceRecord] = {}
+        self._current_workspace_id: str | None = None
+        self._current_source: Source | None = None
+
+    def close(self) -> None:
+        """Release this runtime's workspace locks without deleting any workspace."""
+
+        for record in self._workspaces.values():
+            lock_file = record.lock_file
+            if not lock_file.closed:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except (OSError, ValueError):
+                    pass
+                try:
+                    lock_file.close()
+                except OSError:
+                    pass
+            directory_fd = record.directory_fd
+            record.directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
+        if self._workspace_root_fd is not None:
+            try:
+                os.close(self._workspace_root_fd)
+            except OSError:
+                pass
+            self._workspace_root_fd = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            # Interpreter shutdown can clear module globals before finalizers run.
+            pass
+
+    def cleanup(self, selector: object) -> CleanupOutcome:
+        """Remove one tracked Watch workspace after explicit selector validation."""
+
+        lookup = self._cleanup_record_for_selector(selector)
+        if lookup.deferred_workspace_id is not None:
+            return self._cleanup_outcome(
+                "cleanup_deferred",
+                None,
+                "The recovered workspace is currently locked by another runtime; no files were deleted.",
+                EvidenceDisposition(False, "cleanup_deferred", "none"),
+                workspace_id=lookup.deferred_workspace_id,
+            )
+        record = lookup.record
+        if record is None:
+            return self._cleanup_outcome(
+                "cleanup_refused",
+                None,
+                "Cleanup accepts only current or one opaque workspace ID issued by this runtime.",
+                EvidenceDisposition(False, "cleanup_refused", "none"),
+            )
+
+        if _has_symlink_component(record.path):
+            self._revoke_workspace(record, "cleanup_refused")
+            return self._cleanup_outcome(
+                "cleanup_refused",
+                record,
+                "The workspace path is symlinked or has a symlinked ancestor; no files were deleted.",
+                EvidenceDisposition(False, "cleanup_refused", "revoked"),
+            )
+
+        if record.cleanup_state == "cleanup_succeeded":
+            if record.path.exists():
+                return self._cleanup_outcome(
+                    "cleanup_refused",
+                    record,
+                    "The previously removed workspace path unexpectedly exists and was not deleted.",
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                )
+            return self._cleanup_outcome(
+                "cleanup_already_absent",
+                record,
+                "The validated workspace is already absent; same-task evidence remains revoked.",
+                EvidenceDisposition(False, "cleanup_already_absent", "revoked"),
+            )
+
+        if not record.path.exists():
+            try:
+                directory_stat = (
+                    os.fstat(record.directory_fd)
+                    if record.directory_fd is not None
+                    else None
+                )
+            except OSError:
+                directory_stat = None
+            if directory_stat is not None and directory_stat.st_nlink >= 2:
+                self._revoke_workspace(record, "cleanup_refused")
+                return self._cleanup_outcome(
+                    "cleanup_refused",
+                    record,
+                    "The workspace path is absent but its validated directory still exists elsewhere; no files were deleted.",
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                )
+            self._revoke_workspace(record, "cleanup_already_absent")
+            return self._cleanup_outcome(
+                "cleanup_already_absent",
+                record,
+                "The validated workspace is already absent; same-task evidence remains revoked.",
+                EvidenceDisposition(False, "cleanup_already_absent", "revoked"),
+            )
+
+        try:
+            fcntl.flock(record.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return self._cleanup_outcome(
+                "cleanup_deferred",
+                record,
+                "The validated workspace is currently locked by another runtime; no files were deleted.",
+                (
+                    EvidenceDisposition(False, "cleanup_deferred", "none")
+                    if record.cleanup_only
+                    else EvidenceDisposition(
+                        True, "cleanup_deferred", "same_task_evidence"
+                    )
+                ),
+            )
+        except (OSError, ValueError):
+            self._revoke_workspace(record, "cleanup_refused")
+            return self._cleanup_outcome(
+                "cleanup_refused",
+                record,
+                "The workspace lock could not be verified; no files were deleted.",
+                EvidenceDisposition(False, "cleanup_refused", "revoked"),
+            )
+
+        validation_error = self._workspace_validation_error(record)
+        if validation_error is not None:
+            self._revoke_workspace(record, "cleanup_refused")
+            return self._cleanup_outcome(
+                "cleanup_refused",
+                record,
+                "Workspace validation failed; no files were deleted. " + validation_error,
+                EvidenceDisposition(False, "cleanup_refused", "revoked"),
+            )
+
+        workspace_fd: int | None = None
+        try:
+            workspace_fd = self._open_workspace_cleanup_directory(record)
+            validation_error = self._workspace_validation_error_at_fd(
+                record, workspace_fd
+            )
+            if validation_error is not None:
+                self._revoke_workspace(record, "cleanup_refused")
+                return self._cleanup_outcome(
+                    "cleanup_refused",
+                    record,
+                    "Workspace validation failed after its directory was anchored; no files were deleted. "
+                    + validation_error,
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                )
+
+            # Darwin/POSIX exposes unlink and directory removal only through a
+            # live leaf name, not through an identity-bound file or directory
+            # descriptor.  A same-user process can replace a validated leaf
+            # between the validation above and ``unlink(name, dir_fd=...)``.
+            # That could delete a user file.  Do not trade the fail-closed
+            # cleanup contract for best-effort removal: retaining this fully
+            # validated workspace is truthful ``cleanup_incomplete`` and
+            # preserves every user path.
+            self._revoke_workspace(record, "cleanup_incomplete")
+            return self._cleanup_outcome(
+                "cleanup_incomplete",
+                record,
+                "The workspace was validated, but this runtime cannot remove named files without a leaf-rebinding race; no files were deleted.",
+                EvidenceDisposition(False, "cleanup_incomplete", "revoked"),
+            )
+        except (OSError, ValueError):
+            self._revoke_workspace(record, "cleanup_refused")
+            return self._cleanup_outcome(
+                "cleanup_refused",
+                record,
+                "The workspace directory could not be anchored without following paths; no files were deleted.",
+                EvidenceDisposition(False, "cleanup_refused", "revoked"),
+            )
+        finally:
+            if workspace_fd is not None:
+                try:
+                    os.close(workspace_fd)
+                except OSError:
+                    pass
+
+    def _cleanup_record_for_selector(self, selector: object) -> _CleanupRecordLookup:
+        if selector == "current":
+            if self._current_workspace_id is None:
+                return _CleanupRecordLookup(None)
+            return _CleanupRecordLookup(
+                self._workspaces.get(self._current_workspace_id)
+            )
+        if not isinstance(selector, str) or not WORKSPACE_ID_PATTERN.fullmatch(selector):
+            return _CleanupRecordLookup(None)
+        record = self._workspaces.get(selector)
+        if record is not None:
+            return _CleanupRecordLookup(record)
+        return self._recover_cleanup_record(selector)
+
+    def _recover_cleanup_record(self, workspace_id: str) -> _CleanupRecordLookup:
+        """Reopen one fixed-root workspace as cleanup-only state.
+
+        A recovered record deliberately has neither a source nor an evidence
+        handle.  It can validate and retain the lock long enough for the
+        existing explicit-cleanup flow, but cannot become Current evidence or
+        authorize acquisition/reuse in this new task session.
+        """
+
+        if self._artifact_root is not None:
+            return _CleanupRecordLookup(None)
+
+        root_fd: int | None = None
+        workspace_fd: int | None = None
+        lock_fd: int | None = None
+        lock_file: TextIO | None = None
+        try:
+            root = self._workspace_root_path(recovery=True)
+            if self._workspace_root_fd is None:
+                raise OSError("The fixed runtime workspace root is not anchored.")
+            root_fd = os.dup(self._workspace_root_fd)
+            workspace_fd = os.open(
+                workspace_id,
+                _NOFOLLOW_DIRECTORY_FLAGS,
+                dir_fd=root_fd,
+            )
+            workspace_stat = os.fstat(workspace_fd)
+            if not stat.S_ISDIR(workspace_stat.st_mode):
+                raise OSError("The recovered workspace is not a directory.")
+            path = root / workspace_id
+            path_identity = _stat_identity(workspace_stat)
+            if (
+                _has_symlink_component(path)
+                or not path.is_dir()
+                or _path_identity(path) != path_identity
+            ):
+                raise OSError("The recovered workspace path cannot be verified.")
+
+            lock_fd = os.open(
+                WORKSPACE_LOCK_NAME,
+                os.O_RDWR | _NOFOLLOW_FILE_FLAGS,
+                dir_fd=workspace_fd,
+            )
+            lock_file = os.fdopen(lock_fd, "r+", encoding="utf-8")
+            lock_fd = None
+            lock_bytes, lock_stat = _read_nofollow_file_at(
+                workspace_fd, WORKSPACE_LOCK_NAME
+            )
+            held_stat = os.fstat(lock_file.fileno())
+            if (
+                _stat_identity(lock_stat) != _stat_identity(held_stat)
+                or lock_bytes != f"{workspace_id}\n".encode("utf-8")
+            ):
+                raise OSError("The recovered workspace lock is invalid.")
+
+            # A held lock wins over every mutable workspace leaf: a live
+            # runtime can be between writes while holding it, including midway
+            # through one append-only manifest record.  Do not parse/cache
+            # that snapshot; the next explicit recovery will reopen it fresh.
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return _CleanupRecordLookup(None, workspace_id)
+
+            marker_bytes, marker_stat = _read_nofollow_file_at(
+                workspace_fd, WORKSPACE_MARKER_NAME
+            )
+            try:
+                marker = json.loads(marker_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise OSError("The recovered workspace marker is unreadable.") from error
+            if marker != {
+                "schema": WORKSPACE_SCHEMA,
+                "version": WORKSPACE_MANIFEST_VERSION,
+                "workspace_id": workspace_id,
+            }:
+                raise OSError("The recovered workspace marker is invalid.")
+
+            manifest_bytes, manifest_stat = _read_nofollow_file_at(
+                workspace_fd, WORKSPACE_MANIFEST_NAME
+            )
+            try:
+                artifacts = _manifest_artifacts_text(
+                    manifest_bytes.decode("utf-8"), workspace_id
+                )
+            except UnicodeError as error:
+                raise OSError("The recovered workspace manifest is unreadable.") from error
+            if artifacts is None:
+                raise OSError("The recovered workspace manifest is invalid.")
+
+            record = _WorkspaceRecord(
+                workspace_id=workspace_id,
+                path=path,
+                path_identity=path_identity,
+                directory_fd=workspace_fd,
+                source=None,
+                controls=None,
+                evidence_handle=None,
+                marker_identity=_stat_identity(marker_stat),
+                manifest_identity=_stat_identity(manifest_stat),
+                marker_digest=_bytes_digest(marker_bytes),
+                manifest_digest=_bytes_digest(manifest_bytes),
+                lock_digest=_bytes_digest(lock_bytes),
+                lock_file=lock_file,
+                artifacts=artifacts,
+                reuse_eligible=False,
+                cleanup_only=True,
+            )
+
+            if self._workspace_validation_error_at_fd(record, workspace_fd) is not None:
+                raise OSError("The recovered workspace failed descriptor validation.")
+            if self._workspace_validation_error(record) is not None:
+                raise OSError("The recovered workspace failed lexical validation.")
+
+            self._workspaces[workspace_id] = record
+            workspace_fd = None
+            lock_file = None
+            return _CleanupRecordLookup(record)
+        except (OSError, ValueError):
+            return _CleanupRecordLookup(None)
+        finally:
+            if lock_file is not None:
+                try:
+                    lock_file.close()
+                except OSError:
+                    pass
+            elif lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            if workspace_fd is not None:
+                try:
+                    os.close(workspace_fd)
+                except OSError:
+                    pass
+            if root_fd is not None:
+                try:
+                    os.close(root_fd)
+                except OSError:
+                    pass
+
+    def _cleanup_outcome(
+        self,
+        state: CleanupState,
+        record: _WorkspaceRecord | None,
+        message: str,
+        disposition: EvidenceDisposition,
+        *,
+        workspace_id: str | None = None,
+    ) -> CleanupOutcome:
+        workspace_id = record.workspace_id if record is not None else workspace_id
+        lines = [
+            "# Watch workspace cleanup",
+            "",
+            f"- State: `{state}`",
+            f"- Workspace ID: `{workspace_id}`" if workspace_id else "- Workspace ID: `none`",
+            f"- Disposal state: `{disposition.disposal_state}`",
+            f"- Reuse state: `{disposition.reuse_state}`",
+            f"- Message: {_render_preescaped_markdown_code(message)}",
+        ]
+        return CleanupOutcome(
+            state=state,
+            workspace_id=workspace_id,
+            message=message,
+            disposition=disposition,
+            report_markdown="\n".join(lines) + "\n",
+        )
+
+    def _workspace_root_path(self, *, recovery: bool = False) -> Path:
+        """Return the anchored workspace root for live work or recovery.
+
+        ``artifact_root`` is an in-process composition seam for hermetic tests.
+        It is never a cleanup-recovery authority: only the fixed marked runtime
+        root below the canonical system temporary directory can be reopened by
+        a fresh runtime.
+        """
+
+        if recovery and self._artifact_root is not None:
+            raise OSError(
+                "Cross-session cleanup is available only for the fixed runtime root."
+            )
+        if self._workspace_root is not None:
+            root = self._workspace_root
+            if (
+                _has_symlink_component(root)
+                or not root.is_dir()
+                or self._workspace_root_identity is None
+                or self._workspace_root_fd is None
+                or _path_identity(root) != self._workspace_root_identity
+            ):
+                raise OSError("The runtime workspace root is no longer a regular directory.")
+            if self._workspace_root_is_fixed:
+                marker_identity = self._workspace_root_marker_identity
+                marker_digest = self._workspace_root_marker_digest
+                if (
+                    marker_identity is None
+                    or marker_digest is None
+                    or _runtime_root_marker_validation_error_at_fd(
+                        self._workspace_root_fd, marker_identity, marker_digest
+                    )
+                    is not None
+                ):
+                    raise OSError("The fixed runtime workspace root marker was altered.")
+            return root
+        if self._artifact_root is None:
+            (
+                root,
+                root_fd,
+                root_marker_identity,
+                root_marker_digest,
+            ) = _open_default_runtime_root(create=not recovery)
+            root_is_fixed = True
+        else:
+            root = _canonicalize_system_path_alias(
+                self._artifact_root.expanduser()
+            )
+            if not root.is_absolute():
+                raise OSError("The runtime workspace root is not an absolute directory.")
+            root_fd = _open_nofollow_directory_path(root, create=True)
+            root_marker_identity = None
+            root_marker_digest = None
+            root_is_fixed = False
+        try:
+            root_identity = _stat_identity(os.fstat(root_fd))
+            if _has_symlink_component(root) or not root.is_dir():
+                raise OSError("The runtime workspace root is not a regular directory.")
+            if root_identity != _path_identity(root):
+                raise OSError("The runtime workspace root identity changed.")
+            if root_is_fixed:
+                assert root_marker_identity is not None
+                assert root_marker_digest is not None
+                if (
+                    _runtime_root_marker_validation_error_at_fd(
+                        root_fd, root_marker_identity, root_marker_digest
+                    )
+                    is not None
+                ):
+                    raise OSError("The fixed runtime workspace root marker was altered.")
+        except (OSError, ValueError):
+            os.close(root_fd)
+            raise
+        self._workspace_root = root
+        self._workspace_root_identity = root_identity
+        self._workspace_root_fd = root_fd
+        self._workspace_root_marker_identity = root_marker_identity
+        self._workspace_root_marker_digest = root_marker_digest
+        self._workspace_root_is_fixed = root_is_fixed
+        return root
+
+    def _open_workspace_cleanup_directory(self, record: _WorkspaceRecord) -> int:
+        """Duplicate the original workspace descriptor for descriptor-bound cleanup."""
+
+        if record.directory_fd is None:
+            raise OSError("The workspace directory is no longer held by this runtime.")
+        workspace_fd = os.dup(record.directory_fd)
+        try:
+            if _stat_identity(os.fstat(workspace_fd)) != record.path_identity:
+                raise OSError("The workspace directory identity changed.")
+        except (OSError, ValueError):
+            os.close(workspace_fd)
+            raise
+        return workspace_fd
+
+    def _run_workspace_command(
+        self,
+        record: _WorkspaceRecord,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+        pending_artifact: str | None = None,
+    ) -> CommandResult:
+        """Run a command only after validating its retained workspace inputs."""
+
+        if not record.reuse_eligible:
+            raise OSError("The workspace is no longer eligible for command output.")
+        if pending_artifact is not None and not _is_runtime_artifact_name(
+            pending_artifact
+        ):
+            raise OSError("The requested command output is not a runtime artifact name.")
+        lexical_validation_error = self._workspace_validation_error(
+            record, pending_artifact=pending_artifact
+        )
+        if lexical_validation_error is not None:
+            raise OSError(
+                "The workspace cannot be used for command output. "
+                + lexical_validation_error
+            )
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            descriptor_validation_error = self._workspace_validation_error_at_fd(
+                record, workspace_fd, pending_artifact=pending_artifact
+            )
+            if descriptor_validation_error is not None:
+                raise OSError(
+                    "The workspace cannot be used for command output. "
+                    + descriptor_validation_error
+                )
+            return self._command_runner.run(
+                executable,
+                arguments,
+                input_fd=input_fd,
+                output_fd=output_fd,
+            )
+        finally:
+            os.close(workspace_fd)
+
+    def _run_visual_media_command(
+        self,
+        media: _VisualMedia,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        workspace: _WorkspaceRecord | None = None,
+        output_fd: int | None = None,
+        pending_artifact: str | None = None,
+    ) -> CommandResult:
+        if media.workspace is None:
+            if workspace is not None:
+                return self._run_workspace_command(
+                    workspace,
+                    executable,
+                    arguments,
+                    output_fd=output_fd,
+                    pending_artifact=pending_artifact,
+                )
+            return self._command_runner.run(
+                executable, arguments, output_fd=output_fd
+            )
+        input_fd = self._open_verified_workspace_artifact_input(
+            media.workspace, media.argument
+        )
+        try:
+            input_argument = f"/dev/fd/{input_fd}"
+            return self._run_workspace_command(
+                media.workspace,
+                executable,
+                [
+                    input_argument if argument == media.argument else argument
+                    for argument in arguments
+                ],
+                input_fd=input_fd,
+                output_fd=output_fd,
+                pending_artifact=pending_artifact,
+            )
+        finally:
+            os.close(input_fd)
+
+    def _workspace_validation_error_at_fd(
+        self,
+        record: _WorkspaceRecord,
+        workspace_fd: int,
+        pending_artifact: str | None = None,
+    ) -> str | None:
+        """Validate a workspace from its anchored directory descriptor."""
+
+        allow_incomplete = record.cleanup_state == "cleanup_incomplete"
+        expected_names = set(record.artifacts) - record.deleted_artifacts
+        if pending_artifact is not None:
+            expected_names.add(pending_artifact)
+        expected_controls = set(WORKSPACE_CONTROL_NAMES) - record.deleted_controls
+        try:
+            observed_names = set(os.listdir(workspace_fd))
+        except OSError:
+            return "The workspace contents cannot be enumerated safely."
+        if observed_names != expected_names | expected_controls:
+            return "The workspace has unknown, missing, or altered entries."
+        if pending_artifact is not None:
+            try:
+                pending_stat = os.stat(
+                    pending_artifact,
+                    dir_fd=workspace_fd,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                return "The pending runtime artifact is missing or symlinked."
+            if not stat.S_ISREG(pending_stat.st_mode) or pending_stat.st_nlink != 1:
+                return "The pending runtime artifact is not a regular file."
+
+        if WORKSPACE_MARKER_NAME in expected_controls:
+            try:
+                marker_bytes, marker_stat = _read_nofollow_file_at(
+                    workspace_fd, WORKSPACE_MARKER_NAME
+                )
+                marker = json.loads(marker_bytes.decode("utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return "The workspace ownership marker cannot be validated."
+            if marker != {
+                "schema": WORKSPACE_SCHEMA,
+                "version": WORKSPACE_MANIFEST_VERSION,
+                "workspace_id": record.workspace_id,
+            } or (
+                _stat_identity(marker_stat) != record.marker_identity
+                or _bytes_digest(marker_bytes) != record.marker_digest
+                or marker_stat.st_nlink != 1
+            ):
+                return "The workspace ownership marker was altered."
+        elif not allow_incomplete:
+            return "The workspace ownership marker is missing."
+
+        if WORKSPACE_MANIFEST_NAME in expected_controls:
+            try:
+                manifest_bytes, manifest_stat = _read_nofollow_file_at(
+                    workspace_fd, WORKSPACE_MANIFEST_NAME
+                )
+                manifest_entries = _manifest_artifacts_text(
+                    manifest_bytes.decode("utf-8"), record.workspace_id
+                )
+            except (OSError, UnicodeError):
+                return "The append-only workspace manifest cannot be validated."
+            if (
+                _stat_identity(manifest_stat) != record.manifest_identity
+                or _bytes_digest(manifest_bytes) != record.manifest_digest
+                or manifest_entries != record.artifacts
+                or manifest_stat.st_nlink != 1
+            ):
+                return "The append-only workspace manifest is invalid or unverified."
+        elif not allow_incomplete:
+            return "The workspace manifest is missing."
+
+        if WORKSPACE_LOCK_NAME in expected_controls:
+            if record.lock_file.closed:
+                return "The workspace lock is not held by this runtime."
+            try:
+                lock_bytes, lock_stat = _read_nofollow_file_at(
+                    workspace_fd, WORKSPACE_LOCK_NAME
+                )
+                held_stat = os.fstat(record.lock_file.fileno())
+            except (OSError, ValueError):
+                return "The workspace lock is not held by this runtime."
+            if (
+                _stat_identity(lock_stat) != _stat_identity(held_stat)
+                or _bytes_digest(lock_bytes) != record.lock_digest
+                or lock_bytes != f"{record.workspace_id}\n".encode("utf-8")
+                or lock_stat.st_nlink != 1
+            ):
+                return "The workspace lock was altered or is not held."
+        elif not allow_incomplete:
+            return "The workspace lock is missing."
+
+        for artifact_name, artifact in record.artifacts.items():
+            if artifact_name in record.deleted_artifacts:
+                continue
+            try:
+                artifact_digest, artifact_stat = _digest_nofollow_file_at(
+                    workspace_fd, artifact_name
+                )
+            except OSError:
+                return "A manifest-listed artifact is missing or symlinked."
+            if (
+                artifact_stat.st_size != artifact.size_bytes
+                or artifact_digest != artifact.sha256
+                or artifact_stat.st_nlink != 1
+            ):
+                return "A manifest-listed artifact was altered."
+        return None
+
+    def _create_workspace(
+        self, source: Source, controls: WatchControls
+    ) -> tuple[_WorkspaceRecord | None, Failure | None]:
+        workspace_path: Path | None = None
+        lock_file: TextIO | None = None
+        lock_fd: int | None = None
+        root_fd: int | None = None
+        workspace_fd: int | None = None
+        record: _WorkspaceRecord | None = None
+        created_workspace_identity: tuple[int, int] | None = None
+        try:
+            root = self._workspace_root_path()
+            if self._workspace_root_fd is None:
+                raise OSError("The runtime workspace root is no longer held by this runtime.")
+            root_fd = os.dup(self._workspace_root_fd)
+            workspace_id = _new_workspace_id()
+            for _ in range(8):
+                workspace_path = root / workspace_id
+                try:
+                    os.mkdir(workspace_id, mode=0o700, dir_fd=root_fd)
+                    created_workspace_identity = _stat_identity(
+                        os.stat(workspace_id, dir_fd=root_fd, follow_symlinks=False)
+                    )
+                    break
+                except FileExistsError:
+                    workspace_id = _new_workspace_id()
+            else:
+                raise OSError("Could not allocate a unique runtime workspace ID.")
+
+            assert workspace_path is not None
+            assert created_workspace_identity is not None
+            workspace_fd = os.open(
+                workspace_id,
+                _NOFOLLOW_DIRECTORY_FLAGS,
+                dir_fd=root_fd,
+            )
+            workspace_identity = _stat_identity(os.fstat(workspace_fd))
+            if workspace_identity != created_workspace_identity:
+                raise OSError(
+                    "The newly created runtime workspace changed before it could be anchored."
+                )
+            marker = {
+                "schema": WORKSPACE_SCHEMA,
+                "version": WORKSPACE_MANIFEST_VERSION,
+                "workspace_id": workspace_id,
+            }
+            manifest_header = {
+                "record": "header",
+                "schema": WORKSPACE_SCHEMA,
+                "version": WORKSPACE_MANIFEST_VERSION,
+                "workspace_id": workspace_id,
+            }
+            marker_bytes = _json_line_bytes(marker)
+            manifest_bytes = _json_line_bytes(manifest_header)
+            lock_bytes = f"{workspace_id}\n".encode("utf-8")
+            marker_stat = _write_new_bytes_at(
+                workspace_fd, WORKSPACE_MARKER_NAME, marker_bytes
+            )
+            manifest_stat = _write_new_json_line_at(
+                workspace_fd, WORKSPACE_MANIFEST_NAME, manifest_header
+            )
+            lock_stat = _write_new_bytes_at(
+                workspace_fd, WORKSPACE_LOCK_NAME, lock_bytes
+            )
+            lock_fd = os.open(
+                WORKSPACE_LOCK_NAME,
+                os.O_RDWR | _NOFOLLOW_FILE_FLAGS,
+                dir_fd=workspace_fd,
+            )
+            held_lock_stat = os.fstat(lock_fd)
+            if _stat_identity(held_lock_stat) != _stat_identity(lock_stat):
+                os.close(lock_fd)
+                lock_fd = None
+                raise OSError("The workspace lock changed during creation.")
+            lock_file = os.fdopen(lock_fd, "r+", encoding="utf-8")
+            lock_fd = None
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            record = _WorkspaceRecord(
+                workspace_id=workspace_id,
+                path=workspace_path,
+                path_identity=workspace_identity,
+                directory_fd=workspace_fd,
+                source=source,
+                controls=controls,
+                evidence_handle=_new_evidence_handle(),
+                marker_identity=_stat_identity(marker_stat),
+                manifest_identity=_stat_identity(manifest_stat),
+                marker_digest=_bytes_digest(marker_bytes),
+                manifest_digest=_bytes_digest(manifest_bytes),
+                lock_digest=_bytes_digest(lock_bytes),
+                lock_file=lock_file,
+                artifacts={},
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            if lock_file is not None:
+                try:
+                    lock_file.close()
+                except OSError:
+                    pass
+            elif lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            return None, Failure(
+                stage="workspace",
+                category="workspace_creation",
+                message=(
+                    "A runtime-owned Watch workspace could not be created safely. "
+                    f"Diagnostic: {_escape_control_sequences(str(error))}"
+                ),
+                attempts=1,
+                disposition=CURRENT_SOURCE_NO_WORKSPACE,
+            )
+        finally:
+            if workspace_fd is not None:
+                if record is None:
+                    try:
+                        os.close(workspace_fd)
+                    except OSError:
+                        pass
+                # The successful record owns this descriptor until close(); it
+                # makes future cleanup independent of later name replacement.
+                workspace_fd = None
+            if root_fd is not None:
+                try:
+                    os.close(root_fd)
+                except OSError:
+                    pass
+
+        self._workspaces[record.workspace_id] = record
+        assert record.evidence_handle is not None
+        self._evidence_handles[record.evidence_handle] = record
+        self._current_workspace_id = record.workspace_id
+        return record, None
+
+    def _record_workspace_artifact(
+        self, record: _WorkspaceRecord, artifact_path: Path, kind: str
+    ) -> None:
+        try:
+            relative = artifact_path.relative_to(record.path)
+        except ValueError as error:
+            raise OSError("A runtime artifact was outside its workspace.") from error
+        if len(relative.parts) != 1:
+            raise OSError("A runtime artifact path is not a regular workspace file.")
+        self._record_workspace_artifact_name(record, relative.name, kind)
+
+    def _record_workspace_artifact_name(
+        self, record: _WorkspaceRecord, artifact_name: str, kind: str
+    ) -> None:
+        if not _is_runtime_artifact_name(artifact_name):
+            raise OSError("A runtime artifact path is not a regular workspace file.")
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            self._record_workspace_artifact_name_at_fd(
+                record, artifact_name, kind, workspace_fd
+            )
+        finally:
+            os.close(workspace_fd)
+
+    def _create_workspace_artifact_output(
+        self, record: _WorkspaceRecord, artifact_name: str
+    ) -> int:
+        """Reserve one no-follow output leaf before an adapter can write bytes."""
+
+        if not _is_runtime_artifact_name(artifact_name):
+            raise OSError("A runtime artifact path is not a regular workspace file.")
+        if artifact_name in record.artifacts:
+            raise OSError("A runtime artifact would overwrite an existing manifest entry.")
+        lexical_validation_error = self._workspace_validation_error(record)
+        if lexical_validation_error is not None:
+            raise OSError("The workspace cannot create an artifact. " + lexical_validation_error)
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            descriptor_validation_error = self._workspace_validation_error_at_fd(
+                record, workspace_fd
+            )
+            if descriptor_validation_error is not None:
+                raise OSError(
+                    "The workspace cannot create an artifact. "
+                    + descriptor_validation_error
+                )
+            output_fd = os.open(
+                artifact_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=workspace_fd,
+            )
+            try:
+                output_stat = os.fstat(output_fd)
+                if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_nlink != 1:
+                    raise OSError("The runtime artifact output is not a regular file.")
+                return output_fd
+            except (OSError, ValueError):
+                os.close(output_fd)
+                raise
+        finally:
+            os.close(workspace_fd)
+
+    def _finalize_workspace_artifact_output(
+        self,
+        record: _WorkspaceRecord,
+        artifact_name: str,
+        kind: str,
+        output_fd: int,
+    ) -> None:
+        """Append a manifest entry only for the still-bound preopened output.
+
+        The producer receives an already-open descriptor, so it cannot select a
+        workspace leaf by pathname.  Before accepting those bytes as evidence,
+        re-open the leaf without following links and require it to be the same
+        inode as the original descriptor.  Any replacement makes the workspace
+        unverified rather than silently accepting attacker-controlled bytes.
+        """
+
+        if not _is_runtime_artifact_name(artifact_name):
+            raise OSError("A runtime artifact path is not a regular workspace file.")
+        if artifact_name in record.artifacts:
+            raise OSError("A runtime artifact would overwrite an existing manifest entry.")
+        try:
+            os.fsync(output_fd)
+            output_stat = os.fstat(output_fd)
+            if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_nlink != 1:
+                raise OSError("The runtime artifact output is not a regular file.")
+            output_digest = _digest_open_file_descriptor(output_fd)
+        except (OSError, ValueError):
+            raise OSError("The runtime artifact output could not be verified.") from None
+
+        entry = _ManifestArtifact(
+            path=artifact_name,
+            kind=kind,
+            disposition="retained",
+            size_bytes=output_stat.st_size,
+            sha256=output_digest,
+        )
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            validation_error = self._workspace_validation_error_at_fd(
+                record, workspace_fd, pending_artifact=artifact_name
+            )
+            if validation_error is not None:
+                raise OSError(
+                    "The workspace changed before its artifact could be recorded. "
+                    + validation_error
+                )
+            live_fd = os.open(
+                artifact_name, _NOFOLLOW_FILE_FLAGS, dir_fd=workspace_fd
+            )
+            try:
+                live_stat = os.fstat(live_fd)
+                if (
+                    not stat.S_ISREG(live_stat.st_mode)
+                    or live_stat.st_nlink != 1
+                    or _stat_identity(live_stat) != _stat_identity(output_stat)
+                    or _digest_open_file_descriptor(live_fd) != output_digest
+                ):
+                    raise OSError("The preopened runtime artifact was replaced.")
+            finally:
+                os.close(live_fd)
+            self._append_workspace_artifact_entry_at_fd(
+                record, entry, workspace_fd, pending_artifact=artifact_name
+            )
+            validation_error = self._workspace_validation_error_at_fd(
+                record, workspace_fd
+            )
+            if validation_error is not None:
+                raise OSError(
+                    "The workspace changed after its artifact was recorded. "
+                    + validation_error
+                )
+            lexical_validation_error = self._workspace_validation_error(record)
+            if lexical_validation_error is not None:
+                raise OSError(
+                    "The workspace changed after its artifact was recorded. "
+                    + lexical_validation_error
+                )
+        finally:
+            os.close(workspace_fd)
+
+    def _retain_failed_workspace_artifact_output(
+        self,
+        record: _WorkspaceRecord,
+        artifact_name: str,
+        kind: str,
+        output_fd: int | None,
+    ) -> None:
+        """Make a safely reserved failed producer output an explicit manifest leaf.
+
+        A command can fail after the runtime has reserved its output file.  It
+        is still runtime-owned only if its descriptor and directory can be
+        verified, so retain it for explicit cleanup rather than deleting a
+        name that may have changed.  A verification failure is deliberately
+        left for the caller's normal fail-closed workspace revocation.
+        """
+
+        if output_fd is None or artifact_name in record.artifacts:
+            return
+        try:
+            self._finalize_workspace_artifact_output(
+                record, artifact_name, kind, output_fd
+            )
+        except (OSError, ValueError):
+            return
+
+    def _open_verified_workspace_artifact_input(
+        self, record: _WorkspaceRecord, artifact_name: str
+    ) -> int:
+        """Open a manifest artifact by descriptor, pinning its verified bytes."""
+
+        artifact = record.artifacts.get(artifact_name)
+        if artifact is None or artifact_name in record.deleted_artifacts:
+            raise OSError("The requested workspace input was not retained as evidence.")
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            input_fd = os.open(
+                artifact_name, _NOFOLLOW_FILE_FLAGS, dir_fd=workspace_fd
+            )
+            try:
+                input_stat = os.fstat(input_fd)
+                if not stat.S_ISREG(input_stat.st_mode):
+                    raise OSError("The requested workspace input is not a regular file.")
+                if input_stat.st_nlink != 1:
+                    raise OSError("The requested workspace input has unexpected links.")
+                input_digest = _digest_open_file_descriptor(input_fd)
+                if (
+                    input_stat.st_size != artifact.size_bytes
+                    or input_digest != artifact.sha256
+                ):
+                    raise OSError("The requested workspace input was altered.")
+                os.lseek(input_fd, 0, os.SEEK_SET)
+                return input_fd
+            except (OSError, ValueError):
+                os.close(input_fd)
+                raise
+        finally:
+            os.close(workspace_fd)
+
+    def _record_workspace_artifact_name_at_fd(
+        self,
+        record: _WorkspaceRecord,
+        artifact_name: str,
+        kind: str,
+        workspace_fd: int,
+    ) -> None:
+        if not _is_runtime_artifact_name(artifact_name):
+            raise OSError("A runtime artifact path is not a regular workspace file.")
+        try:
+            artifact_digest, artifact_stat = _digest_nofollow_file_at(
+                workspace_fd, artifact_name
+            )
+        except OSError as error:
+            raise OSError("A runtime artifact is missing or symlinked.") from error
+        entry = _ManifestArtifact(
+            path=artifact_name,
+            kind=kind,
+            disposition="retained",
+            size_bytes=artifact_stat.st_size,
+            sha256=artifact_digest,
+        )
+        self._append_workspace_artifact_entry_at_fd(
+            record, entry, workspace_fd, pending_artifact=artifact_name
+        )
+
+    def _append_workspace_artifact_entry_at_fd(
+        self,
+        record: _WorkspaceRecord,
+        entry: _ManifestArtifact,
+        workspace_fd: int,
+        *,
+        pending_artifact: str,
+    ) -> None:
+        existing = record.artifacts.get(entry.path)
+        if existing is not None:
+            if existing != entry:
+                raise OSError("A runtime artifact would overwrite an existing manifest entry.")
+            return
+        if (
+            self._workspace_validation_error_at_fd(
+                record, workspace_fd, pending_artifact=pending_artifact
+            )
+            is not None
+        ):
+            raise OSError("The workspace changed before its artifact could be recorded.")
+        payload = {
+            "record": "artifact",
+            "path": entry.path,
+            "kind": entry.kind,
+            "disposition": entry.disposition,
+            "size_bytes": entry.size_bytes,
+            "sha256": entry.sha256,
+        }
+        manifest_stat, manifest_digest = _append_json_line_at(
+            workspace_fd, WORKSPACE_MANIFEST_NAME, payload
+        )
+        record.artifacts[entry.path] = entry
+        record.manifest_identity = _stat_identity(manifest_stat)
+        record.manifest_digest = manifest_digest
+
+    def _read_verified_workspace_artifact(
+        self, record: _WorkspaceRecord, artifact_name: str
+    ) -> bytes:
+        """Read one manifest-recorded artifact through the held workspace FD."""
+
+        artifact = record.artifacts.get(artifact_name)
+        if artifact is None:
+            raise OSError("The runtime artifact was not recorded in the workspace manifest.")
+        workspace_fd = self._open_workspace_cleanup_directory(record)
+        try:
+            artifact_bytes, artifact_stat = _read_nofollow_file_at(
+                workspace_fd, artifact_name
+            )
+            if (
+                artifact_stat.st_size != artifact.size_bytes
+                or _bytes_digest(artifact_bytes) != artifact.sha256
+            ):
+                raise OSError("The runtime artifact changed after it was recorded.")
+            validation_error = self._workspace_validation_error_at_fd(record, workspace_fd)
+            if validation_error is not None:
+                raise OSError("The workspace changed after command output. " + validation_error)
+            return artifact_bytes
+        finally:
+            os.close(workspace_fd)
+
+    def _workspace_artifact_display_path(
+        self, record: _WorkspaceRecord, artifact_name: str
+    ) -> Path:
+        """Return a host-facing path only while the lexical workspace is intact."""
+
+        if not _is_runtime_artifact_name(artifact_name):
+            raise OSError("The runtime artifact name is unsafe for host inspection.")
+        validation_error = self._workspace_validation_error(record)
+        if validation_error is not None:
+            raise OSError(
+                "The workspace cannot be exposed for host inspection. "
+                + validation_error
+            )
+        artifact_path = record.path / artifact_name
+        if not _is_regular_nonsymlink_file(artifact_path):
+            raise OSError("The runtime artifact is not a regular file for host inspection.")
+        return artifact_path
+
+    def _workspace_validation_error(
+        self, record: _WorkspaceRecord, pending_artifact: str | None = None
+    ) -> str | None:
+        path = record.path
+        if _has_symlink_component(path) or not path.is_dir():
+            return "The workspace is missing, symlinked, or not a directory."
+        try:
+            root = self._workspace_root_path()
+        except OSError:
+            return "The runtime workspace root can no longer be verified."
+        try:
+            path_identity = _path_identity(path)
+        except OSError:
+            return "The workspace identity cannot be verified."
+        if (
+            path.parent != root
+            or not WORKSPACE_ID_PATTERN.fullmatch(record.workspace_id)
+            or path_identity != record.path_identity
+        ):
+            return "The workspace is not a direct child with an opaque runtime ID."
+
+        allow_incomplete = record.cleanup_state == "cleanup_incomplete"
+        expected_names = set(record.artifacts) - record.deleted_artifacts
+        if pending_artifact is not None:
+            expected_names.add(pending_artifact)
+        expected_controls = set(WORKSPACE_CONTROL_NAMES) - record.deleted_controls
+        try:
+            observed_names = {entry.name for entry in path.iterdir()}
+        except OSError:
+            return "The workspace contents cannot be enumerated safely."
+        if observed_names != expected_names | expected_controls:
+            return "The workspace has unknown, missing, or altered entries."
+        if pending_artifact is not None:
+            pending_path = path / pending_artifact
+            if (
+                not _is_regular_nonsymlink_file(pending_path)
+                or pending_path.stat().st_nlink != 1
+            ):
+                return "The pending runtime artifact is missing or symlinked."
+
+        marker_path = path / WORKSPACE_MARKER_NAME
+        manifest_path = path / WORKSPACE_MANIFEST_NAME
+        lock_path = path / WORKSPACE_LOCK_NAME
+        if WORKSPACE_MARKER_NAME in expected_controls:
+            if not _is_regular_nonsymlink_file(marker_path):
+                return "The workspace ownership marker is not a regular file."
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                marker_digest = _file_digest(marker_path)
+                marker_identity = _path_identity(marker_path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return "The workspace ownership marker cannot be validated."
+            if marker != {
+                "schema": WORKSPACE_SCHEMA,
+                "version": WORKSPACE_MANIFEST_VERSION,
+                "workspace_id": record.workspace_id,
+            } or (
+                marker_identity != record.marker_identity
+                or marker_digest != record.marker_digest
+                or marker_path.stat().st_nlink != 1
+            ):
+                return "The workspace ownership marker was altered."
+        elif not allow_incomplete:
+            return "The workspace ownership marker is missing."
+
+        if WORKSPACE_MANIFEST_NAME in expected_controls:
+            if not _is_regular_nonsymlink_file(manifest_path):
+                return "The workspace manifest is not a regular file."
+            try:
+                manifest_digest = _file_digest(manifest_path)
+                manifest_identity = _path_identity(manifest_path)
+            except OSError:
+                return "The append-only workspace manifest cannot be validated."
+            if (
+                manifest_identity != record.manifest_identity
+                or manifest_digest != record.manifest_digest
+                or manifest_path.stat().st_nlink != 1
+            ):
+                return "The append-only workspace manifest was altered."
+            entries = _manifest_artifacts(
+                manifest_path, record.workspace_id
+            )
+            if entries is None or entries != record.artifacts:
+                return "The append-only workspace manifest is invalid or unverified."
+        elif not allow_incomplete:
+            return "The workspace manifest is missing."
+
+        if WORKSPACE_LOCK_NAME in expected_controls:
+            if not _is_regular_nonsymlink_file(lock_path):
+                return "The workspace lock is not a regular file."
+            try:
+                lock_stat = lock_path.stat()
+                held_stat = os.fstat(record.lock_file.fileno())
+                lock_digest = _file_digest(lock_path)
+                lock_contents = lock_path.read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                return "The workspace lock is not held by this runtime."
+            if (
+                record.lock_file.closed
+                or lock_stat.st_ino != held_stat.st_ino
+                or lock_stat.st_dev != held_stat.st_dev
+                or lock_digest != record.lock_digest
+                or lock_contents != f"{record.workspace_id}\n"
+                or lock_stat.st_nlink != 1
+            ):
+                return "The workspace lock was altered or is not held."
+        elif not allow_incomplete:
+            return "The workspace lock is missing."
+
+        for artifact_name, artifact in record.artifacts.items():
+            if artifact_name in record.deleted_artifacts:
+                continue
+            artifact_path = path / artifact_name
+            if not _is_regular_nonsymlink_file(artifact_path):
+                return "A manifest-listed artifact is missing or symlinked."
+            try:
+                size_bytes = artifact_path.stat().st_size
+                digest = _file_digest(artifact_path)
+            except OSError:
+                return "A manifest-listed artifact cannot be verified."
+            if (
+                size_bytes != artifact.size_bytes
+                or digest != artifact.sha256
+                or artifact_path.stat().st_nlink != 1
+            ):
+                return "A manifest-listed artifact was altered."
+        return None
+
+    def _attach_workspace_outcome(
+        self,
+        record: _WorkspaceRecord,
+        outcome: EvidenceOutcome,
+        *,
+        store: bool,
+    ) -> EvidenceOutcome:
+        validation_error = self._workspace_validation_error(record)
+        if validation_error is None:
+            if (
+                self._reuse_enabled
+                and not record.cleanup_only
+                and record.evidence_handle is not None
+            ):
+                disposition = EvidenceDisposition(
+                    True, "retained", "same_task_evidence"
+                )
+                evidence_handle = record.evidence_handle
+                integrity_line: tuple[str, ...] = ()
+            else:
+                disposition = EvidenceDisposition(False, "retained", "none")
+                evidence_handle = None
+                integrity_line = (
+                    "- Workspace reuse: `unavailable after this one-shot runtime exits`",
+                )
+        else:
+            self._revoke_workspace(record, "cleanup_refused")
+            disposition = EvidenceDisposition(False, "cleanup_refused", "revoked")
+            evidence_handle = None
+            integrity_line = (
+                "- Workspace integrity: `unverified; same-task reuse is unavailable`",
+            )
+        report = outcome.report_markdown.rstrip("\n") + "\n\n" + "\n".join(
+            (
+                "## Workspace retention",
+                f"- Workspace ID: `{record.workspace_id}`",
+                f"- Disposal state: `{disposition.disposal_state}`",
+                f"- Reuse state: `{disposition.reuse_state}`",
+                *integrity_line,
+            )
+        ) + "\n"
+        retained = replace(
+            outcome,
+            report_markdown=report,
+            workspace_id=record.workspace_id,
+            evidence_handle=evidence_handle,
+            disposition=disposition,
+        )
+        if store:
+            record.outcome = retained
+            if retained.controls is not None:
+                record.controls = retained.controls
+        return retained
+
+    def _revoke_workspace(self, record: _WorkspaceRecord, state: CleanupState) -> None:
+        record.reuse_eligible = False
+        record.cleanup_state = state
+        if record.evidence_handle is not None:
+            self._evidence_handles.pop(record.evidence_handle, None)
+            self._retired_evidence_handles[record.evidence_handle] = record
+        if self._current_workspace_id == record.workspace_id:
+            self._current_workspace_id = None
+
+    def _reuse_outcome(
+        self,
+        source: Source,
+        controls: WatchControls,
+        watch_request: Mapping[str, object],
+        prior_evidence: object | None,
+    ) -> tuple[EvidenceOutcome | None, Failure | None, _WorkspaceRecord | None]:
+        has_handle, handle = _evidence_handle_from_prior(prior_evidence)
+        if not has_handle:
+            return None, None, None
+        if not self._reuse_enabled:
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "This one-shot runtime does not retain a same-task evidence handle.",
+                    NO_EVIDENCE_NO_WORKSPACE,
+                ),
+                None,
+            )
+        if handle is None:
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "The supplied evidence handle is not a valid same-task opaque handle.",
+                    NO_EVIDENCE_NO_WORKSPACE,
+                ),
+                None,
+            )
+        record = self._evidence_handles.get(handle)
+        if record is None:
+            retired = self._retired_evidence_handles.get(handle)
+            if retired is not None:
+                return (
+                    None,
+                    _reuse_failure(
+                        "evidence_disposed",
+                        "The prior same-task evidence was disposed or made ineligible and cannot be reused.",
+                        EvidenceDisposition(
+                            False,
+                            retired.cleanup_state or "cleanup_refused",
+                            "revoked",
+                        ),
+                    ),
+                    retired,
+                )
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "The supplied evidence handle is unknown, stale, or belongs to another task.",
+                    NO_EVIDENCE_NO_WORKSPACE,
+                ),
+                None,
+            )
+        if (
+            record.cleanup_only
+            or record.source is None
+            or record.controls is None
+            or record.evidence_handle is None
+        ):
+            self._revoke_workspace(record, "cleanup_refused")
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "The supplied evidence handle is not eligible for same-task reuse.",
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                ),
+                record,
+            )
+        if record.source.kind != source.kind or record.source.value != source.value:
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "The supplied evidence handle does not match this Current source.",
+                    EvidenceDisposition(True, "retained", "same_task_evidence"),
+                ),
+                record,
+            )
+        if not _reuse_controls_match(record.controls, controls, watch_request):
+            return (
+                None,
+                _reuse_failure(
+                    "reuse_requires_approval",
+                    "This follow-up requests evidence outside the retained same-task scope. Start a new explicit preparation instead; no media was reacquired.",
+                    EvidenceDisposition(True, "retained", "same_task_evidence"),
+                ),
+                record,
+            )
+        if not record.reuse_eligible or self._workspace_validation_error(record) is not None:
+            self._revoke_workspace(record, "cleanup_refused")
+            return (
+                None,
+                _reuse_failure(
+                    "evidence_disposed",
+                    "The prior same-task evidence is no longer eligible for reuse; no media was reacquired.",
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                ),
+                record,
+            )
+        if record.outcome is None:
+            self._revoke_workspace(record, "cleanup_refused")
+            return (
+                None,
+                _reuse_failure(
+                    "invalid_evidence_handle",
+                    "The supplied evidence handle has no immutable same-task outcome.",
+                    EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                ),
+                record,
+            )
+        self._current_workspace_id = record.workspace_id
+        self._current_source = record.source
+        return record.outcome, None, record
 
     def prepare(
         self,
@@ -411,6 +2034,61 @@ class WatchEvidenceRuntime:
             )
         assert controls is not None
 
+        previous_current_source = self._current_source
+        source = Source(source.kind, source.value, True)
+        self._current_source = source
+        same_current_source = (
+            previous_current_source is not None
+            and previous_current_source.kind == source.kind
+            and previous_current_source.value == source.value
+        )
+        if not same_current_source:
+            self._current_workspace_id = None
+
+        if controls.caption_track is None:
+            has_handle, _ = _evidence_handle_from_prior(prior_evidence)
+            current_record = (
+                self._workspaces.get(self._current_workspace_id)
+                if self._current_workspace_id is not None
+                else None
+            )
+            if same_current_source and not has_handle:
+                disposition = (
+                    EvidenceDisposition(True, "retained", "same_task_evidence")
+                    if current_record is not None
+                    and current_record.reuse_eligible
+                    and not current_record.cleanup_only
+                    and current_record.source is not None
+                    and current_record.source.kind == source.kind
+                    and current_record.source.value == source.value
+                    else CURRENT_SOURCE_NO_WORKSPACE
+                )
+                return self._failure_outcome(
+                    state="stopped",
+                    source=source,
+                    controls=controls,
+                    failure=_reuse_failure(
+                        "reuse_requires_approval",
+                        "This same-task follow-up must supply its opaque evidence handle before any new acquisition; no media was reacquired.",
+                        disposition,
+                    ),
+                    workspace=current_record,
+                )
+
+            reused_outcome, reuse_failure, reuse_record = self._reuse_outcome(
+                source, controls, watch_request, prior_evidence
+            )
+            if reused_outcome is not None:
+                return reused_outcome
+            if reuse_failure is not None:
+                return self._failure_outcome(
+                    state="stopped",
+                    source=source,
+                    controls=controls,
+                    failure=reuse_failure,
+                    workspace=reuse_record,
+                )
+
         caption_selection, selection_failure = self._selected_caption(
             source, controls, prior_evidence
         )
@@ -424,8 +2102,46 @@ class WatchEvidenceRuntime:
         selected_caption = (
             caption_selection.choice if caption_selection is not None else None
         )
+        workspace: _WorkspaceRecord | None = None
+        if caption_selection is not None:
+            workspace = self._workspaces.get(caption_selection.workspace_id)
+            if (
+                workspace is None
+                or not workspace.reuse_eligible
+                or self._workspace_validation_error(workspace) is not None
+            ):
+                if workspace is not None:
+                    self._revoke_workspace(workspace, "cleanup_refused")
+                return self._failure_outcome(
+                    state="stopped",
+                    source=source,
+                    controls=controls,
+                    failure=_reuse_failure(
+                        "evidence_disposed",
+                        "The caption-selection workspace is no longer eligible; no caption was downloaded.",
+                        EvidenceDisposition(False, "cleanup_refused", "revoked"),
+                    ),
+                    workspace=workspace,
+                )
+            if workspace.outcome is not None and workspace.outcome.terminal:
+                if not _reuse_controls_match(workspace.controls, controls, watch_request):
+                    return self._failure_outcome(
+                        state="stopped",
+                        source=source,
+                        controls=controls,
+                        failure=_reuse_failure(
+                            "reuse_requires_approval",
+                            "This completed caption selection requests evidence outside its retained same-task scope. Start a new explicit preparation instead; no media was reacquired.",
+                            EvidenceDisposition(
+                                True, "retained", "same_task_evidence"
+                            ),
+                        ),
+                        workspace=workspace,
+                    )
+                self._current_workspace_id = workspace.workspace_id
+                self._current_source = workspace.source
+                return workspace.outcome
 
-        source = Source(source.kind, source.value, True)
         tools, executable_paths, javascript_support = self._preflight(source.kind)
         required_name = "ffprobe" if source.kind == "local" else "yt-dlp"
         required_path = executable_paths[required_name]
@@ -533,25 +2249,41 @@ class WatchEvidenceRuntime:
                 failure=known_duration_failure,
             )
 
+        if workspace is None:
+            workspace, workspace_failure = self._create_workspace(source, controls)
+            if workspace_failure is not None:
+                return self._failure_outcome(
+                    state="failed",
+                    source=source,
+                    warnings=warnings,
+                    tools=tools,
+                    javascript_support=javascript_support,
+                    controls=controls,
+                    failure=workspace_failure,
+                )
+        assert workspace is not None
+
         if source.kind == "url":
             caption_outcome = self._url_caption_outcome(
                 source=source,
                 controls=controls,
                 metadata_probe=metadata_result,
                 selected_caption=selected_caption,
-                yt_dlp=required_path,
                 warnings=warnings,
                 tools=tools,
                 javascript_support=javascript_support,
+                workspace=workspace,
             )
-            return self._with_visual_evidence(
+            outcome = self._with_visual_evidence(
                 caption_outcome,
                 source=source,
                 metadata=metadata_result.metadata,
                 controls=controls,
                 executable_paths=executable_paths,
                 question=watch_request.get("question"),
+                workspace=workspace,
             )
+            return self._attach_workspace_outcome(workspace, outcome, store=True)
 
         if self._visual_enabled:
             visual, visual_warnings = self._prepare_visual_evidence(
@@ -560,6 +2292,7 @@ class WatchEvidenceRuntime:
                 controls=controls,
                 executable_paths=executable_paths,
                 question=watch_request.get("question"),
+                workspace=workspace,
             )
         else:
             visual, visual_warnings = None, ()
@@ -590,7 +2323,7 @@ class WatchEvidenceRuntime:
             controls=controls,
             visual=visual,
         )
-        return EvidenceOutcome(
+        outcome = EvidenceOutcome(
             state="partial",
             terminal=True,
             source=source,
@@ -604,6 +2337,7 @@ class WatchEvidenceRuntime:
             controls=controls,
             report_markdown=report,
         )
+        return self._attach_workspace_outcome(workspace, outcome, store=True)
 
     def _selected_caption(
         self,
@@ -997,10 +2731,10 @@ class WatchEvidenceRuntime:
         controls: WatchControls,
         metadata_probe: _SourceProbe,
         selected_caption: CaptionChoice | None,
-        yt_dlp: str,
         warnings: tuple[str, ...],
         tools: tuple[ToolStatus, ...],
         javascript_support: JavaScriptSupport,
+        workspace: _WorkspaceRecord,
     ) -> EvidenceOutcome:
         caption_inventory = self._caption_inventory(
             source, metadata_probe.caption_candidates, selected_caption
@@ -1050,7 +2784,11 @@ class WatchEvidenceRuntime:
                     )
                 decision_handle = _new_decision_handle()
                 self._register_caption_selections(
-                    source, decision_handle, caption_choices, metadata_probe
+                    source,
+                    decision_handle,
+                    caption_choices,
+                    metadata_probe,
+                    workspace.workspace_id,
                 )
                 coverage = EvidenceCoverage("complete", "none", "none", "partial")
                 report = _render_report(
@@ -1111,9 +2849,22 @@ class WatchEvidenceRuntime:
                     caption_inventory=caption_inventory,
                 )
 
-        raw_segments, caption_warnings = self._download_caption(
-            yt_dlp, source.value, selected_caption
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in metadata_probe.caption_candidates
+                if _choice_matches_candidate(selected_caption, candidate)
+            ),
+            None,
         )
+        if selected_candidate is None or selected_candidate.caption_url is None:
+            raw_segments, caption_warnings = None, (
+                "The selected native caption no longer has a verified retrieval route; transcript evidence is unavailable.",
+            )
+        else:
+            raw_segments, caption_warnings = self._download_caption(
+                selected_caption, selected_candidate.caption_url, workspace
+            )
         if raw_segments is None:
             return self._completed_outcome(
                 state="partial",
@@ -1215,6 +2966,7 @@ class WatchEvidenceRuntime:
         decision_handle: str,
         choices: Sequence[CaptionChoice],
         metadata_probe: _SourceProbe,
+        workspace_id: str,
     ) -> None:
         stale_ids = [
             choice_id
@@ -1229,84 +2981,53 @@ class WatchEvidenceRuntime:
                 decision_handle=decision_handle,
                 choice=choice,
                 metadata_probe=metadata_probe,
+                workspace_id=workspace_id,
             )
 
     def _download_caption(
-        self, yt_dlp: str, source: str, selected_caption: CaptionChoice
+        self,
+        selected_caption: CaptionChoice,
+        caption_url: str,
+        workspace: _WorkspaceRecord,
     ) -> tuple[tuple[TranscriptSegment, ...] | None, tuple[str, ...]]:
-        write_flag = (
-            "--write-subs"
-            if selected_caption.caption_type == "manual"
-            else "--write-auto-subs"
-        )
+        caption_name = f"caption.{selected_caption.format}"
+        output_fd: int | None = None
+        artifact_finalized = False
         try:
-            with tempfile.TemporaryDirectory(prefix="watch-caption-") as directory:
-                output_template = str(Path(directory) / "caption.%(ext)s")
-                result = self._command_runner.run(
-                    yt_dlp,
-                    [
-                        "--ignore-config",
-                        "--no-plugin-dirs",
-                        "--no-playlist",
-                        "--skip-download",
-                        "--no-cache-dir",
-                        "--no-update",
-                        "--no-remote-components",
-                        write_flag,
-                        "--sub-langs",
-                        selected_caption.language,
-                        "--sub-format",
-                        selected_caption.format,
-                        "--output",
-                        output_template,
-                        "--no-warnings",
-                        "--socket-timeout",
-                        "15",
-                        "--retries",
-                        "0",
-                        "--extractor-retries",
-                        "0",
-                        "--",
-                        source,
-                    ],
-                )
-                caption_files = sorted(
-                    path
-                    for path in Path(directory).iterdir()
-                    if (
-                        path.is_file()
-                        and path.suffix.casefold()
-                        == f".{selected_caption.format}"
-                    )
-                )
-                if len(caption_files) != 1:
-                    return None, (
-                        "Native caption retrieval did not produce one usable caption file; transcript evidence is unavailable.",
-                    )
-                caption_path = caption_files[0]
-                if caption_path.stat().st_size > MAX_CAPTION_BYTES:
-                    return None, (
-                        "The selected native caption exceeds the safe parsing limit; transcript evidence is unavailable.",
-                    )
-                try:
-                    caption_bytes = caption_path.read_bytes()
-                except OSError:
-                    return None, (
-                        "The selected native caption could not be read safely; transcript evidence is unavailable.",
-                    )
-        except (OSError, subprocess.SubprocessError):
-            return None, (
-                "Native caption retrieval could not run; transcript evidence is unavailable.",
+            output_fd = self._create_workspace_artifact_output(workspace, caption_name)
+            self._caption_fetcher.fetch(
+                caption_url, output_fd, max_bytes=MAX_CAPTION_BYTES
             )
+            self._finalize_workspace_artifact_output(
+                workspace, caption_name, "caption", output_fd
+            )
+            artifact_finalized = True
+            caption_bytes = self._read_verified_workspace_artifact(
+                workspace, caption_name
+            )
+            if len(caption_bytes) > MAX_CAPTION_BYTES:
+                return None, (
+                    "The selected native caption exceeds the safe parsing limit; transcript evidence is unavailable.",
+                )
+        except (OSError, subprocess.SubprocessError):
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, caption_name, "caption", output_fd
+                )
+            return None, (
+                "Native caption retrieval did not produce one verified caption file; transcript evidence is unavailable.",
+            )
+        finally:
+            if output_fd is not None:
+                try:
+                    os.close(output_fd)
+                except OSError:
+                    pass
 
         segments = _parse_caption(selected_caption.format, caption_bytes)
         if segments is None:
             return None, (
                 "The selected native caption could not be parsed; transcript evidence is unavailable.",
-            )
-        if result.returncode != 0:
-            return segments, (
-                "yt-dlp reported an error after writing the selected caption; parsed the available caption artifact.",
             )
         return segments, ()
 
@@ -1373,6 +3094,7 @@ class WatchEvidenceRuntime:
         controls: WatchControls,
         executable_paths: Mapping[str, str | None],
         question: object,
+        workspace: _WorkspaceRecord,
     ) -> EvidenceOutcome:
         if (
             not outcome.terminal
@@ -1386,6 +3108,7 @@ class WatchEvidenceRuntime:
             controls=controls,
             executable_paths=executable_paths,
             question=question,
+            workspace=workspace,
         )
         if controls.output_dir is not None:
             visual_warnings += (
@@ -1441,6 +3164,7 @@ class WatchEvidenceRuntime:
         controls: WatchControls,
         executable_paths: Mapping[str, str | None],
         question: object,
+        workspace: _WorkspaceRecord,
     ) -> tuple[VisualEvidence | None, tuple[str, ...]]:
         if controls.detail == "transcript" and not controls.cues_seconds:
             return (
@@ -1471,23 +3195,15 @@ class WatchEvidenceRuntime:
             )
 
         try:
-            artifact_root = self._create_visual_artifact_root()
-        except OSError as error:
-            return None, (
-                "Visual evidence was not prepared because a current-run artifact location "
-                f"could not be created: {_escape_control_sequences(str(error))}",
-            )
-
-        try:
-            media_path, acquisition_warning = self._visual_media_path(
+            media, acquisition_warning = self._visual_media_path(
                 source=source,
                 yt_dlp=executable_paths.get("yt-dlp"),
-                artifact_root=artifact_root,
+                workspace=workspace,
             )
-            if media_path is None:
+            if media is None:
                 return None, (acquisition_warning,)
 
-            source_geometry = self._source_video_geometry(ffprobe, media_path)
+            source_geometry = self._source_video_geometry(ffprobe, media)
             if source_geometry is None:
                 return None, (
                     "Visual evidence was not prepared because source display geometry is "
@@ -1495,7 +3211,7 @@ class WatchEvidenceRuntime:
                 )
 
             plan, planning_warnings = self._plan_visual_frames(
-                media_path=media_path,
+                media=media,
                 metadata=metadata,
                 controls=controls,
                 ffmpeg=ffmpeg,
@@ -1503,8 +3219,8 @@ class WatchEvidenceRuntime:
             )
             extracted_frames, extraction_warnings = self._extract_visual_frames(
                 candidates=plan.candidates,
-                media_path=media_path,
-                artifact_root=artifact_root,
+                media=media,
+                workspace=workspace,
                 source_geometry=source_geometry,
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
@@ -1513,8 +3229,8 @@ class WatchEvidenceRuntime:
             frames, inspection_state, inspection_warnings = self._inspect_visual_frames(
                 frames=extracted_frames,
                 batches=batches,
-                media_path=media_path,
-                artifact_root=artifact_root,
+                media=media,
+                workspace=workspace,
                 source_geometry=source_geometry,
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
@@ -1555,79 +3271,84 @@ class WatchEvidenceRuntime:
             + scale_warnings,
         )
 
-    def _create_visual_artifact_root(self) -> Path:
-        base = self._artifact_root
-        if base is None:
-            return Path(tempfile.mkdtemp(prefix="codex-watch-visual-"))
-        resolved_base = base.expanduser().resolve(strict=False)
-        resolved_base.mkdir(parents=True, exist_ok=True)
-        return Path(
-            tempfile.mkdtemp(prefix="codex-watch-visual-", dir=str(resolved_base))
-        )
-
     def _visual_media_path(
         self,
         *,
         source: Source,
         yt_dlp: str | None,
-        artifact_root: Path,
-    ) -> tuple[Path | None, str]:
+        workspace: _WorkspaceRecord,
+    ) -> tuple[_VisualMedia | None, str]:
         if source.kind == "local":
-            return Path(source.value), ""
+            return _VisualMedia(source.value, None), ""
         if yt_dlp is None:
             return (
                 None,
                 "Visual evidence was not prepared because yt-dlp is unavailable for "
                 "the approved public source.",
             )
-        result = self._command_runner.run(
-            yt_dlp,
-            [
-                "--ignore-config",
-                "--no-plugin-dirs",
-                "--no-playlist",
-                "--no-cache-dir",
-                "--no-update",
-                "--no-remote-components",
-                "--no-warnings",
-                "--socket-timeout",
-                "15",
-                "--retries",
-                "0",
-                "--extractor-retries",
-                "0",
-                "--format",
-                "bestvideo[height<=1080]/bestvideo/best",
-                "--output",
-                str(artifact_root / "source.%(ext)s"),
-                "--print",
-                "after_move:filepath",
-                "--",
-                source.value,
-            ],
-        )
+        media_name = "source.media"
+        output_fd: int | None = None
+        artifact_finalized = False
+        try:
+            output_fd = self._create_workspace_artifact_output(workspace, media_name)
+            result = self._run_workspace_command(
+                workspace,
+                yt_dlp,
+                [
+                    "--ignore-config",
+                    "--no-plugin-dirs",
+                    "--no-playlist",
+                    "--no-cache-dir",
+                    "--no-update",
+                    "--no-remote-components",
+                    "--no-warnings",
+                    "--quiet",
+                    "--no-progress",
+                    "--no-part",
+                    "--socket-timeout",
+                    "15",
+                    "--retries",
+                    "0",
+                    "--extractor-retries",
+                    "0",
+                    "--format",
+                    "bestvideo[height<=1080]/bestvideo/best",
+                    "--output",
+                    "-",
+                    "--",
+                    source.value,
+                ],
+                output_fd=output_fd,
+                pending_artifact=media_name,
+            )
+            self._finalize_workspace_artifact_output(
+                workspace, media_name, "media", output_fd
+            )
+            artifact_finalized = True
+        except (OSError, subprocess.SubprocessError):
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, media_name, "media", output_fd
+                )
+            return None, "Visual media acquisition produced an unverified workspace artifact."
+        finally:
+            if output_fd is not None:
+                try:
+                    os.close(output_fd)
+                except OSError:
+                    pass
         if result.returncode != 0:
             return (
                 None,
                 "Visual media acquisition failed after the approved source-host request. "
                 f"Diagnostic: {_escape_control_sequences((result.stderr or result.stdout).strip())}",
             )
-        output_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if not output_lines:
-            return None, "Visual media acquisition did not report a controlled output path."
-        try:
-            media_path = Path(output_lines[-1]).resolve(strict=True)
-            media_path.relative_to(artifact_root.resolve())
-        except (OSError, RuntimeError, ValueError):
-            return None, "Visual media acquisition reported an unsafe or missing output path."
-        if not media_path.is_file():
-            return None, "Visual media acquisition did not produce a regular media file."
-        return media_path, ""
+        return _VisualMedia(media_name, workspace), ""
 
     def _plan_visual_frames(
         self,
         *,
-        media_path: Path,
+        media: _VisualMedia,
         metadata: MetadataEvidence,
         controls: WatchControls,
         ffmpeg: str,
@@ -1679,7 +3400,7 @@ class WatchEvidenceRuntime:
             if controls.detail == "efficient":
                 keyframes = self._keyframe_candidates(
                     ffprobe=ffprobe,
-                    media_path=media_path,
+                    media=media,
                     scope_start=scope_start,
                     scope_end=scope_end,
                 )
@@ -1689,7 +3410,7 @@ class WatchEvidenceRuntime:
                     keyframe_warnings,
                 ) = self._prepare_ordinary_candidates(
                     candidates=keyframes,
-                    media_path=media_path,
+                    media=media,
                     ffmpeg=ffmpeg,
                     keep_duplicates=controls.keep_duplicates,
                 )
@@ -1704,7 +3425,7 @@ class WatchEvidenceRuntime:
                             candidates=_uniform_candidates(
                                 scope_start, scope_end, target
                             ),
-                            media_path=media_path,
+                            media=media,
                             ffmpeg=ffmpeg,
                             keep_duplicates=controls.keep_duplicates,
                         )
@@ -1714,7 +3435,7 @@ class WatchEvidenceRuntime:
             elif controls.detail == "balanced":
                 scenes = self._scene_candidates(
                     ffmpeg=ffmpeg,
-                    media_path=media_path,
+                    media=media,
                     scope_start=scope_start,
                     scope_end=scope_end,
                 )
@@ -1724,7 +3445,7 @@ class WatchEvidenceRuntime:
                     scene_warnings,
                 ) = self._prepare_ordinary_candidates(
                     candidates=scenes,
-                    media_path=media_path,
+                    media=media,
                     ffmpeg=ffmpeg,
                     keep_duplicates=controls.keep_duplicates,
                 )
@@ -1739,7 +3460,7 @@ class WatchEvidenceRuntime:
                             candidates=_uniform_candidates(
                                 scope_start, scope_end, target
                             ),
-                            media_path=media_path,
+                            media=media,
                             ffmpeg=ffmpeg,
                             keep_duplicates=controls.keep_duplicates,
                         )
@@ -1749,7 +3470,7 @@ class WatchEvidenceRuntime:
             else:
                 scenes = self._scene_candidates(
                     ffmpeg=ffmpeg,
-                    media_path=media_path,
+                    media=media,
                     scope_start=scope_start,
                     scope_end=scope_end,
                 )
@@ -1757,7 +3478,7 @@ class WatchEvidenceRuntime:
                     ordinary_candidates, deduplication, ordinary_warnings = (
                         self._prepare_ordinary_candidates(
                             candidates=scenes,
-                            media_path=media_path,
+                            media=media,
                             ffmpeg=ffmpeg,
                             keep_duplicates=controls.keep_duplicates,
                         )
@@ -1770,7 +3491,7 @@ class WatchEvidenceRuntime:
                             candidates=_uniform_candidates(
                                 scope_start, scope_end, target
                             ),
-                            media_path=media_path,
+                            media=media,
                             ffmpeg=ffmpeg,
                             keep_duplicates=controls.keep_duplicates,
                         )
@@ -1818,7 +3539,7 @@ class WatchEvidenceRuntime:
         self,
         *,
         candidates: tuple[_FrameCandidate, ...],
-        media_path: Path,
+        media: _VisualMedia,
         ffmpeg: str,
         keep_duplicates: bool,
     ) -> tuple[
@@ -1837,7 +3558,7 @@ class WatchEvidenceRuntime:
             return rate_limited, "disabled", tuple(warnings)
         deduplicated, state, dedupe_warning = self._deduplicate_ordinary_candidates(
             candidates=rate_limited,
-            media_path=media_path,
+            media=media,
             ffmpeg=ffmpeg,
         )
         if dedupe_warning is not None:
@@ -1848,11 +3569,12 @@ class WatchEvidenceRuntime:
         self,
         *,
         ffprobe: str,
-        media_path: Path,
+        media: _VisualMedia,
         scope_start: float,
         scope_end: float,
     ) -> tuple[_FrameCandidate, ...]:
-        result = self._command_runner.run(
+        result = self._run_visual_media_command(
+            media,
             ffprobe,
             [
                 "-v",
@@ -1867,7 +3589,7 @@ class WatchEvidenceRuntime:
                 "frame=best_effort_timestamp_time",
                 "-of",
                 "json",
-                str(media_path),
+                media.argument,
             ],
         )
         if result.returncode != 0:
@@ -1892,11 +3614,12 @@ class WatchEvidenceRuntime:
         self,
         *,
         ffmpeg: str,
-        media_path: Path,
+        media: _VisualMedia,
         scope_start: float,
         scope_end: float,
     ) -> tuple[_FrameCandidate, ...]:
-        result = self._command_runner.run(
+        result = self._run_visual_media_command(
+            media,
             ffmpeg,
             [
                 "-nostdin",
@@ -1908,7 +3631,7 @@ class WatchEvidenceRuntime:
                 _format_seconds(scope_end - scope_start),
                 "-copyts",
                 "-i",
-                str(media_path),
+                media.argument,
                 "-map",
                 "0:v:0",
                 "-vf",
@@ -1936,13 +3659,13 @@ class WatchEvidenceRuntime:
         self,
         *,
         candidates: tuple[_FrameCandidate, ...],
-        media_path: Path,
+        media: _VisualMedia,
         ffmpeg: str,
     ) -> tuple[tuple[_FrameCandidate, ...], DeduplicationState, str | None]:
         fingerprints: set[str] = set()
         retained: list[_FrameCandidate] = []
         for candidate in candidates:
-            fingerprint = self._frame_fingerprint(ffmpeg, media_path, candidate.timestamp_seconds)
+            fingerprint = self._frame_fingerprint(ffmpeg, media, candidate.timestamp_seconds)
             if fingerprint is None:
                 return (
                     candidates,
@@ -1956,9 +3679,10 @@ class WatchEvidenceRuntime:
         return tuple(retained), "applied", None
 
     def _frame_fingerprint(
-        self, ffmpeg: str, media_path: Path, timestamp_seconds: float
+        self, ffmpeg: str, media: _VisualMedia, timestamp_seconds: float
     ) -> str | None:
-        result = self._command_runner.run(
+        result = self._run_visual_media_command(
+            media,
             ffmpeg,
             [
                 "-nostdin",
@@ -1967,7 +3691,7 @@ class WatchEvidenceRuntime:
                 "-ss",
                 _format_seconds(timestamp_seconds),
                 "-i",
-                str(media_path),
+                media.argument,
                 "-map",
                 "0:v:0",
                 "-frames:v",
@@ -1991,8 +3715,8 @@ class WatchEvidenceRuntime:
         self,
         *,
         candidates: tuple[_FrameCandidate, ...],
-        media_path: Path,
-        artifact_root: Path,
+        media: _VisualMedia,
+        workspace: _WorkspaceRecord,
         source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
@@ -2004,39 +3728,68 @@ class WatchEvidenceRuntime:
             filename = (
                 f"frame-{position:04d}-{int(round(candidate.timestamp_seconds * 1000)):012d}.jpg"
             )
-            frame_path = artifact_root / filename
-            result = self._command_runner.run(
-                ffmpeg,
-                [
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-ss",
-                    _format_seconds(candidate.timestamp_seconds),
-                    "-i",
-                    str(media_path),
-                    "-map",
-                    "0:v:0",
-                    "-frames:v",
-                    "1",
-                    "-an",
-                    "-sn",
-                    "-dn",
-                    "-vf",
-                    _square_pixel_scale_filter(768),
-                    "-q:v",
-                    "2",
-                    "-n",
-                    str(frame_path),
-                ],
-            )
-            if result.returncode != 0 or not frame_path.is_file():
+            output_fd: int | None = None
+            artifact_finalized = False
+            try:
+                output_fd = self._create_workspace_artifact_output(workspace, filename)
+                result = self._run_visual_media_command(
+                    media,
+                    ffmpeg,
+                    [
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-ss",
+                        _format_seconds(candidate.timestamp_seconds),
+                        "-i",
+                        media.argument,
+                        "-map",
+                        "0:v:0",
+                        "-frames:v",
+                        "1",
+                        "-an",
+                        "-sn",
+                        "-dn",
+                        "-vf",
+                        _square_pixel_scale_filter(768),
+                        "-q:v",
+                        "2",
+                        "-f",
+                        "image2pipe",
+                        "-c:v",
+                        "mjpeg",
+                        "pipe:1",
+                    ],
+                    workspace=workspace,
+                    output_fd=output_fd,
+                    pending_artifact=filename,
+                )
+                self._finalize_workspace_artifact_output(
+                    workspace, filename, "frame", output_fd
+                )
+                artifact_finalized = True
+            except (OSError, subprocess.SubprocessError):
+                if not artifact_finalized:
+                    self._retain_failed_workspace_artifact_output(
+                        workspace, filename, "frame", output_fd
+                    )
+                warnings.append(
+                    "No visual frame was recorded because its workspace artifact could not be verified."
+                )
+                continue
+            finally:
+                if output_fd is not None:
+                    try:
+                        os.close(output_fd)
+                    except OSError:
+                        pass
+            if result.returncode != 0:
                 warnings.append(
                     "No visual frame was recorded for source time "
                     f"{_format_seconds(candidate.timestamp_seconds)} because frame extraction failed."
                 )
                 continue
-            geometry = self._jpeg_geometry(ffprobe, frame_path)
+            geometry = self._jpeg_geometry(ffprobe, filename, workspace)
             if geometry is None or not _valid_frame_geometry(
                 geometry, source_geometry
             ):
@@ -2047,6 +3800,7 @@ class WatchEvidenceRuntime:
                 )
                 continue
             width, height = geometry.width, geometry.height
+            frame_path = self._workspace_artifact_display_path(workspace, filename)
             frames.append(
                 VisualFrame(
                     timestamp_seconds=candidate.timestamp_seconds,
@@ -2062,23 +3816,28 @@ class WatchEvidenceRuntime:
         return tuple(frames), tuple(warnings)
 
     def _source_video_geometry(
-        self, ffprobe: str, media_path: Path
+        self, ffprobe: str, media: _VisualMedia
     ) -> _VideoGeometry | None:
-        geometry = self._video_geometry(ffprobe, media_path)
+        geometry = self._video_geometry(ffprobe, media)
         if geometry is None or geometry.display_aspect_ratio is None:
             return None
         return geometry
 
-    def _jpeg_geometry(self, ffprobe: str, frame_path: Path) -> _VideoGeometry | None:
-        geometry = self._video_geometry(ffprobe, frame_path)
+    def _jpeg_geometry(
+        self, ffprobe: str, frame_name: str, workspace: _WorkspaceRecord
+    ) -> _VideoGeometry | None:
+        geometry = self._video_geometry(
+            ffprobe, _VisualMedia(frame_name, workspace)
+        )
         if geometry is None or geometry.codec_name not in {"mjpeg", "jpeg"}:
             return None
         return geometry
 
     def _video_geometry(
-        self, ffprobe: str, media_path: Path
+        self, ffprobe: str, media: _VisualMedia
     ) -> _VideoGeometry | None:
-        result = self._command_runner.run(
+        result = self._run_visual_media_command(
+            media,
             ffprobe,
             [
                 "-v",
@@ -2089,7 +3848,7 @@ class WatchEvidenceRuntime:
                 "stream=codec_name,width,height,sample_aspect_ratio,display_aspect_ratio",
                 "-of",
                 "json",
-                str(media_path),
+                media.argument,
             ],
         )
         if result.returncode != 0:
@@ -2126,8 +3885,8 @@ class WatchEvidenceRuntime:
         *,
         frames: tuple[VisualFrame, ...],
         batches: tuple[tuple[VisualFrame, ...], ...],
-        media_path: Path,
-        artifact_root: Path,
+        media: _VisualMedia,
+        workspace: _WorkspaceRecord,
         source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
@@ -2171,8 +3930,8 @@ class WatchEvidenceRuntime:
         detailed_frames, escalation_warnings = self._extract_requested_detail_frames(
             frames=inspected_frames,
             escalations=inspection.escalations,
-            media_path=media_path,
-            artifact_root=artifact_root,
+            media=media,
+            workspace=workspace,
             source_geometry=source_geometry,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
@@ -2246,8 +4005,8 @@ class WatchEvidenceRuntime:
         *,
         frames: tuple[VisualFrame, ...],
         escalations: tuple[FrameEscalation, ...],
-        media_path: Path,
-        artifact_root: Path,
+        media: _VisualMedia,
+        workspace: _WorkspaceRecord,
         source_geometry: _VideoGeometry,
         ffmpeg: str,
         ffprobe: str,
@@ -2277,39 +4036,68 @@ class WatchEvidenceRuntime:
             if frame.path in requested_paths:
                 continue
             requested_paths.add(frame.path)
-            detail_path = artifact_root / (
+            detail_name = (
                 f"frame-{frame.chronological_position:04d}-"
                 f"{int(round(frame.timestamp_seconds * 1000)):012d}-detail.jpg"
             )
-            result = self._command_runner.run(
-                ffmpeg,
-                [
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-ss",
-                    _format_seconds(frame.timestamp_seconds),
-                    "-i",
-                    str(media_path),
-                    "-map",
-                    "0:v:0",
-                    "-frames:v",
-                    "1",
-                    "-an",
-                    "-sn",
-                    "-dn",
-                    "-vf",
-                    _square_pixel_scale_filter(1024),
-                    "-q:v",
-                    "2",
-                    "-n",
-                    str(detail_path),
-                ],
-            )
-            geometry = self._jpeg_geometry(ffprobe, detail_path)
+            output_fd: int | None = None
+            artifact_finalized = False
+            try:
+                output_fd = self._create_workspace_artifact_output(workspace, detail_name)
+                result = self._run_visual_media_command(
+                    media,
+                    ffmpeg,
+                    [
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-ss",
+                        _format_seconds(frame.timestamp_seconds),
+                        "-i",
+                        media.argument,
+                        "-map",
+                        "0:v:0",
+                        "-frames:v",
+                        "1",
+                        "-an",
+                        "-sn",
+                        "-dn",
+                        "-vf",
+                        _square_pixel_scale_filter(1024),
+                        "-q:v",
+                        "2",
+                        "-f",
+                        "image2pipe",
+                        "-c:v",
+                        "mjpeg",
+                        "pipe:1",
+                    ],
+                    workspace=workspace,
+                    output_fd=output_fd,
+                    pending_artifact=detail_name,
+                )
+                self._finalize_workspace_artifact_output(
+                    workspace, detail_name, "detail_frame", output_fd
+                )
+                artifact_finalized = True
+            except (OSError, subprocess.SubprocessError):
+                if not artifact_finalized:
+                    self._retain_failed_workspace_artifact_output(
+                        workspace, detail_name, "detail_frame", output_fd
+                    )
+                warnings.append(
+                    "The requested higher-resolution frame could not be verified as a workspace artifact."
+                )
+                continue
+            finally:
+                if output_fd is not None:
+                    try:
+                        os.close(output_fd)
+                    except OSError:
+                        pass
+            geometry = self._jpeg_geometry(ffprobe, detail_name, workspace)
             if (
                 result.returncode != 0
-                or not detail_path.is_file()
                 or geometry is None
                 or not _valid_frame_geometry(
                     geometry, source_geometry, max_width=1024
@@ -2321,6 +4109,7 @@ class WatchEvidenceRuntime:
                 )
                 continue
             width, height = geometry.width, geometry.height
+            detail_path = self._workspace_artifact_display_path(workspace, detail_name)
             detail_frames.append(
                 replace(
                     frame,
@@ -2343,8 +4132,16 @@ class WatchEvidenceRuntime:
         tools: tuple[ToolStatus, ...] = (),
         javascript_support: JavaScriptSupport = JAVASCRIPT_NOT_CHECKED,
         controls: WatchControls | None = None,
+        workspace: _WorkspaceRecord | None = None,
     ) -> EvidenceOutcome:
         coverage = EvidenceCoverage("none", "none", "none", "none")
+        retained_handle = (
+            workspace.evidence_handle
+            if workspace is not None
+            and failure.disposition.reuse_state == "same_task_evidence"
+            and workspace.reuse_eligible
+            else None
+        )
         return EvidenceOutcome(
             state=state,
             terminal=True,
@@ -2358,8 +4155,16 @@ class WatchEvidenceRuntime:
             javascript_support=javascript_support,
             controls=controls,
             report_markdown=_render_failure_report(
-                state, source, failure, warnings, javascript_support
+                state,
+                source,
+                failure,
+                warnings,
+                javascript_support,
+                workspace_id=workspace.workspace_id if workspace is not None else None,
             ),
+            workspace_id=workspace.workspace_id if workspace is not None else None,
+            evidence_handle=retained_handle,
+            disposition=failure.disposition,
         )
 
 
@@ -2816,7 +4621,7 @@ def _metadata_from_ytdlp(data: Mapping[str, object]) -> MetadataEvidence:
 def _caption_candidates_from_ytdlp(
     data: Mapping[str, object],
 ) -> tuple[_CaptionCandidate, ...]:
-    formats_by_track: dict[tuple[str, CaptionType], set[str]] = {}
+    formats_by_track: dict[tuple[str, CaptionType], dict[str, set[str]]] = {}
     caption_catalogs: tuple[tuple[CaptionType, str], ...] = (
         ("manual", "subtitles"),
         ("automatic", "automatic_captions"),
@@ -2833,24 +4638,45 @@ def _caption_candidates_from_ytdlp(
                 raw_formats, (str, bytes)
             ):
                 continue
-            track_formats = formats_by_track.setdefault((language, caption_type), set())
+            track_formats = formats_by_track.setdefault((language, caption_type), {})
             for raw_format in raw_formats:
                 if not isinstance(raw_format, Mapping):
                     continue
                 extension = _caption_format(raw_format.get("ext"))
-                if extension is None:
+                caption_url = _caption_resource_url(raw_format.get("url"))
+                if extension is None or caption_url is None:
                     continue
-                track_formats.add(extension)
-    candidates = {
-        _CaptionCandidate(
-            language=language,
-            caption_type=caption_type,
-            format=_preferred_caption_format(formats),
-            usable=bool(formats & SUPPORTED_CAPTION_FORMATS),
+                track_formats.setdefault(extension, set()).add(caption_url)
+    candidates: list[_CaptionCandidate] = []
+    for (language, caption_type), formats in formats_by_track.items():
+        if not formats:
+            continue
+        # A metadata response can contain several retrieval endpoints for the
+        # same logical track and format.  Treating the first one as authority
+        # would silently make an ambiguous network request.  Prefer a supported
+        # format only when it has exactly one validated endpoint.
+        retrievable_formats = {
+            extension
+            for extension, urls in formats.items()
+            if len(urls) == 1 and extension in SUPPORTED_CAPTION_FORMATS
+        }
+        if retrievable_formats:
+            selected_format = _preferred_caption_format(retrievable_formats)
+            caption_url = next(iter(formats[selected_format]))
+            usable = True
+        else:
+            selected_format = _preferred_caption_format(set(formats))
+            caption_url = None
+            usable = False
+        candidates.append(
+            _CaptionCandidate(
+                language=language,
+                caption_type=caption_type,
+                format=selected_format,
+                usable=usable,
+                caption_url=caption_url,
+            )
         )
-        for (language, caption_type), formats in formats_by_track.items()
-        if formats
-    }
     return tuple(
         sorted(
             candidates,
@@ -2900,6 +4726,527 @@ def _caption_choice_from_inventory(item: CaptionInventoryItem) -> CaptionChoice:
 
 def _new_decision_handle() -> str:
     return f"decision_{secrets.token_urlsafe(24)}"
+
+
+def _new_workspace_id() -> str:
+    return f"workspace_{secrets.token_urlsafe(24)}"
+
+
+def _new_evidence_handle() -> str:
+    return f"evidence_{secrets.token_urlsafe(24)}"
+
+
+def _json_line_bytes(value: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def _write_new_bytes_at(
+    directory_fd: int, name: str, value: bytes
+) -> os.stat_result:
+    """Create one runtime control file through an anchored directory FD."""
+
+    file_fd = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        offset = 0
+        while offset < len(value):
+            offset += os.write(file_fd, value[offset:])
+        os.fsync(file_fd)
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise OSError("Expected one unlinked runtime control file.")
+        return file_stat
+    finally:
+        os.close(file_fd)
+
+
+def _write_all_bytes(file_descriptor: int, value: bytes) -> None:
+    offset = 0
+    while offset < len(value):
+        offset += os.write(file_descriptor, value[offset:])
+
+
+def _decode_command_output(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _write_new_json_line_at(
+    directory_fd: int, name: str, value: Mapping[str, object]
+) -> os.stat_result:
+    return _write_new_bytes_at(directory_fd, name, _json_line_bytes(value))
+
+
+def _append_json_line_at(
+    directory_fd: int, name: str, value: Mapping[str, object]
+) -> tuple[os.stat_result, str]:
+    """Append one manifest record through its validated workspace descriptor."""
+
+    file_fd = os.open(
+        name,
+        os.O_RDWR | os.O_APPEND | _NOFOLLOW_FILE_FLAGS,
+        dir_fd=directory_fd,
+    )
+    try:
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise OSError("Expected a regular manifest file.")
+        payload = _json_line_bytes(value)
+        _write_all_bytes(file_fd, payload)
+        os.fsync(file_fd)
+        os.lseek(file_fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                return file_stat, digest.hexdigest()
+            digest.update(chunk)
+    finally:
+        os.close(file_fd)
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        while True:
+            chunk = input_file.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+
+def _bytes_digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _stat_identity(path_stat: os.stat_result) -> tuple[int, int]:
+    return path_stat.st_dev, path_stat.st_ino
+
+
+def _path_identity(path: Path) -> tuple[int, int]:
+    return _stat_identity(path.stat())
+
+
+def _read_nofollow_file_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+    """Read one regular file through a directory descriptor without links."""
+
+    file_fd = os.open(name, _NOFOLLOW_FILE_FLAGS, dir_fd=directory_fd)
+    try:
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise OSError("Expected a regular file.")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks), file_stat
+            chunks.append(chunk)
+    finally:
+        os.close(file_fd)
+
+
+def _digest_nofollow_file_at(directory_fd: int, name: str) -> tuple[str, os.stat_result]:
+    """Digest one regular file through a directory descriptor without links."""
+
+    file_fd = os.open(name, _NOFOLLOW_FILE_FLAGS, dir_fd=directory_fd)
+    try:
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise OSError("Expected a regular file.")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                return digest.hexdigest(), file_stat
+            digest.update(chunk)
+    finally:
+        os.close(file_fd)
+
+
+def _digest_open_file_descriptor(file_descriptor: int) -> str:
+    """Digest a pinned regular file and restore its position to the beginning."""
+
+    file_stat = os.fstat(file_descriptor)
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise OSError("Expected a regular file.")
+    os.lseek(file_descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(file_descriptor, 1024 * 1024)
+        if not chunk:
+            os.lseek(file_descriptor, 0, os.SEEK_SET)
+            return digest.hexdigest()
+        digest.update(chunk)
+
+
+def _is_runtime_artifact_name(name: str) -> bool:
+    """Accept one non-control direct-child filename generated by this runtime."""
+
+    return (
+        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", name))
+        and name not in WORKSPACE_CONTROL_NAMES
+    )
+
+
+def _canonicalize_system_path_alias(path: Path) -> Path:
+    """Preserve strict checks below macOS's stable /tmp and /var aliases."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for alias_text in ("/tmp", "/var"):
+        alias = Path(alias_text)
+        try:
+            target = Path(os.path.realpath(alias))
+            is_system_alias = alias.is_symlink() and target != alias
+        except OSError:
+            continue
+        if not is_system_alias:
+            continue
+        try:
+            relative = lexical.relative_to(alias)
+        except ValueError:
+            continue
+        return target / relative
+    return lexical
+
+
+def _runtime_root_marker_bytes() -> bytes:
+    return _json_line_bytes(
+        {"schema": RUNTIME_ROOT_SCHEMA, "version": RUNTIME_ROOT_VERSION}
+    )
+
+
+def _read_runtime_root_marker_at(
+    root_fd: int,
+) -> tuple[os.stat_result, str]:
+    marker_bytes, marker_stat = _read_nofollow_file_at(
+        root_fd, RUNTIME_ROOT_MARKER_NAME
+    )
+    if marker_bytes != _runtime_root_marker_bytes():
+        raise OSError("The fixed runtime workspace root marker is invalid.")
+    return marker_stat, _bytes_digest(marker_bytes)
+
+
+def _runtime_root_marker_validation_error_at_fd(
+    root_fd: int,
+    marker_identity: tuple[int, int],
+    marker_digest: str,
+) -> str | None:
+    try:
+        marker_stat, observed_digest = _read_runtime_root_marker_at(root_fd)
+    except OSError:
+        return "The fixed runtime workspace root marker cannot be validated."
+    if (
+        _stat_identity(marker_stat) != marker_identity
+        or observed_digest != marker_digest
+        or marker_stat.st_nlink != 1
+    ):
+        return "The fixed runtime workspace root marker was altered."
+    return None
+
+
+def _open_default_runtime_root(
+    *, create: bool
+) -> tuple[Path, int, tuple[int, int], str]:
+    """Open the one fixed, marked runtime root through no-follow descriptors.
+
+    The fixed location gives explicit ``cleanup <workspace-id>`` a narrowly
+    scoped cross-session lookup authority.  It is not a user-selected path:
+    an absent or unmarked existing root is refused for recovery, and every
+    workspace remains a direct child selected only by its opaque ID.
+    """
+
+    temp_root = _canonicalize_system_path_alias(Path(tempfile.gettempdir()))
+    if not temp_root.is_absolute():
+        raise OSError("The system temporary directory is not absolute.")
+    parent_fd = _open_nofollow_directory_path(temp_root, create=False)
+    root_fd: int | None = None
+    try:
+        created_identity: tuple[int, int] | None = None
+        try:
+            root_fd = os.open(
+                RUNTIME_ROOT_DIRECTORY_NAME,
+                _NOFOLLOW_DIRECTORY_FLAGS,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(RUNTIME_ROOT_DIRECTORY_NAME, mode=0o700, dir_fd=parent_fd)
+            created_stat = os.stat(
+                RUNTIME_ROOT_DIRECTORY_NAME,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(created_stat.st_mode):
+                raise OSError("Created runtime workspace root is not a directory.")
+            created_identity = _stat_identity(created_stat)
+            root_fd = os.open(
+                RUNTIME_ROOT_DIRECTORY_NAME,
+                _NOFOLLOW_DIRECTORY_FLAGS,
+                dir_fd=parent_fd,
+            )
+
+        root_stat = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or (
+                created_identity is not None
+                and _stat_identity(root_stat) != created_identity
+            )
+        ):
+            raise OSError(
+                "The fixed runtime workspace root changed before it could be anchored."
+            )
+        if created_identity is not None:
+            marker_stat = _write_new_bytes_at(
+                root_fd, RUNTIME_ROOT_MARKER_NAME, _runtime_root_marker_bytes()
+            )
+            marker_digest = _bytes_digest(_runtime_root_marker_bytes())
+        else:
+            marker_stat, marker_digest = _read_runtime_root_marker_at(root_fd)
+        return (
+            temp_root / RUNTIME_ROOT_DIRECTORY_NAME,
+            root_fd,
+            _stat_identity(marker_stat),
+            marker_digest,
+        )
+    except (OSError, ValueError):
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(parent_fd)
+
+
+def _open_nofollow_directory_path(path: Path, *, create: bool) -> int:
+    """Anchor an absolute directory by descriptor without resolving path links.
+
+    A lexical ``Path.resolve()`` is unsafe for a workspace root: a same-user
+    process can replace a checked directory with a symlink between the check
+    and resolution.  Walk every component from an open descriptor for ``/``;
+    each child is opened with ``O_NOFOLLOW`` relative to its already anchored
+    parent.  Optional creation uses that same parent descriptor, never a
+    multi-component pathname operation, and captures the new entry identity
+    before opening it.  POSIX has no atomic mkdir-and-open-by-descriptor
+    primitive; this detects swaps across the observable creation/binding
+    boundary and later lifecycle validation remains fail-closed.
+    """
+
+    if not path.is_absolute():
+        raise OSError("Expected an absolute runtime workspace root.")
+    directory_fd = os.open("/", _NOFOLLOW_DIRECTORY_FLAGS)
+    try:
+        for component in path.parts[1:]:
+            created_identity: tuple[int, int] | None = None
+            try:
+                child_fd = os.open(
+                    component, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=directory_fd
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                created_stat = os.stat(
+                    component, dir_fd=directory_fd, follow_symlinks=False
+                )
+                if not stat.S_ISDIR(created_stat.st_mode):
+                    raise OSError("Created runtime workspace component is not a directory.")
+                created_identity = _stat_identity(created_stat)
+                child_fd = os.open(
+                    component, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=directory_fd
+                )
+            try:
+                child_stat = os.fstat(child_fd)
+                if not stat.S_ISDIR(child_stat.st_mode):
+                    raise OSError("Expected a regular runtime workspace directory.")
+                if (
+                    created_identity is not None
+                    and _stat_identity(child_stat) != created_identity
+                ):
+                    raise OSError(
+                        "A newly created runtime workspace directory changed before it could be anchored."
+                    )
+            except (OSError, ValueError):
+                os.close(child_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = child_fd
+        return directory_fd
+    except (OSError, ValueError):
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _has_symlink_component(path: Path) -> bool:
+    """Reject a lexical path if any existing component is a symlink.
+
+    ``Path.resolve()`` is intentionally not used here: it would hide an ancestor
+    replacement that redirects a once-owned workspace through a symlink.
+    """
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    current = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        current /= part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        if stat.S_ISLNK(mode):
+            return True
+    return False
+
+
+def _is_regular_nonsymlink_file(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file()
+
+
+def _manifest_artifacts(
+    manifest_path: Path, workspace_id: str
+) -> dict[str, _ManifestArtifact] | None:
+    try:
+        value = manifest_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return _manifest_artifacts_text(value, workspace_id)
+
+
+def _manifest_artifacts_text(
+    value: str, workspace_id: str
+) -> dict[str, _ManifestArtifact] | None:
+    lines = value.splitlines()
+    if not lines:
+        return None
+    try:
+        header = json.loads(lines[0])
+    except json.JSONDecodeError:
+        return None
+    if header != {
+        "record": "header",
+        "schema": WORKSPACE_SCHEMA,
+        "version": WORKSPACE_MANIFEST_VERSION,
+        "workspace_id": workspace_id,
+    }:
+        return None
+    artifacts: dict[str, _ManifestArtifact] = {}
+    for raw_line in lines[1:]:
+        try:
+            item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(item, Mapping) or set(item) != {
+            "record",
+            "path",
+            "kind",
+            "disposition",
+            "size_bytes",
+            "sha256",
+        }:
+            return None
+        path = item.get("path")
+        kind = item.get("kind")
+        disposition = item.get("disposition")
+        size_bytes = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (
+            item.get("record") != "artifact"
+            or not isinstance(path, str)
+            or not isinstance(kind, str)
+            or not kind
+            or disposition != "retained"
+            or isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or Path(path).name != path
+            or "/" in path
+            or "\\" in path
+            or path in {".", ".."}
+            or path in WORKSPACE_CONTROL_NAMES
+            or path in artifacts
+        ):
+            return None
+        artifacts[path] = _ManifestArtifact(
+            path, kind, "retained", size_bytes, digest
+        )
+    return artifacts
+
+
+def _evidence_handle_from_prior(prior_evidence: object | None) -> tuple[bool, str | None]:
+    if isinstance(prior_evidence, EvidenceOutcome):
+        return (
+            prior_evidence.evidence_handle is not None,
+            prior_evidence.evidence_handle,
+        )
+    if isinstance(prior_evidence, Mapping):
+        if "evidence_handle" not in prior_evidence:
+            return False, None
+        value = prior_evidence.get("evidence_handle")
+    elif isinstance(prior_evidence, str):
+        value = prior_evidence
+    else:
+        return False, None
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"evidence_[A-Za-z0-9_-]{20,}", value)
+    ):
+        return True, None
+    return True, value
+
+
+def _reuse_controls_match(
+    retained: WatchControls,
+    requested: WatchControls,
+    raw_request: Mapping[str, object],
+) -> bool:
+    for request_name, attribute in (
+        ("detail", "detail"),
+        ("focus", "focus_start_seconds"),
+        ("cues", "cues_seconds"),
+        ("max_frames", "max_frames"),
+        ("keep_duplicates", "keep_duplicates"),
+        ("output_dir", "output_dir"),
+        ("caption_track", "caption_track"),
+    ):
+        if request_name in raw_request and getattr(retained, attribute) != getattr(
+            requested, attribute
+        ):
+            return False
+    if "focus" in raw_request and retained.focus_end_seconds != requested.focus_end_seconds:
+        return False
+    return True
+
+
+def _reuse_failure(
+    category: FailureCategory, message: str, disposition: EvidenceDisposition
+) -> Failure:
+    return Failure(
+        stage="reuse",
+        category=category,
+        message=message,
+        attempts=0,
+        disposition=disposition,
+    )
 
 
 def _prior_evidence_matches_selection(
@@ -3565,6 +5912,35 @@ def _is_non_public_host(hostname: str) -> bool:
     return not address.is_global
 
 
+def _caption_resource_url(value: object) -> str | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(ord(character) <= 0x20 for character in value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        # Accessing ``port`` validates malformed numeric port syntax.
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.username
+        or parsed.password
+        or not parsed.hostname
+        or _is_non_public_host(parsed.hostname)
+    ):
+        return None
+    return value
+
+
+def _validate_caption_resource_url(value: str) -> None:
+    if _caption_resource_url(value) is None:
+        raise OSError("The selected native caption URL is not a public HTTP(S) resource.")
+
+
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -3830,6 +6206,8 @@ def _render_failure_report(
     failure: Failure,
     warnings: tuple[str, ...],
     javascript_support: JavaScriptSupport,
+    *,
+    workspace_id: str | None = None,
 ) -> str:
     lines = [
         "# Watch evidence report",
@@ -3842,6 +6220,8 @@ def _render_failure_report(
         f"- Reuse state: `{failure.disposition.reuse_state}`",
         f"- JavaScript support: `{javascript_support.status}`",
     ]
+    if workspace_id is not None:
+        lines.append(f"- Workspace ID: `{workspace_id}`")
     if source is not None:
         lines.append(f"- Source: {_render_untrusted_markdown_code(source.value)}")
     if warnings:

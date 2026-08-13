@@ -352,7 +352,9 @@ cleanup current
 cleanup <workspace-id>
 ```
 
-Before deleting, the runtime MUST validate all of the following: direct-child location, opaque ID, ownership marker, manifest format/version, no traversal/symlink path, known owned artifacts only, and a held lock. It deletes manifest-listed files one at a time using non-shell APIs; it MUST NOT recursively delete an unresolved directory.
+Before deleting, the runtime MUST validate all of the following: direct-child location, opaque ID, ownership marker, manifest format/version, no traversal/symlink path, known owned artifacts only, and a held lock. Where the platform provides identity-safe leaf deletion, it deletes manifest-listed files one at a time using non-shell APIs; it MUST NOT recursively delete an unresolved directory.
+
+On macOS, public POSIX APIs cannot bind an unlink or directory removal to a previously verified leaf identity: a same-UID process can replace a checked name before deletion. When that identity-safe primitive is unavailable, the runtime MUST preserve the fully validated workspace, revoke reuse, and return `cleanup_incomplete` with a truthful no-deletion report. It MUST NOT substitute a best-effort name-based delete for this fail-closed outcome.
 
 If validation fails or the workspace is altered/unknown/unverifiable, return `cleanup_refused` and delete nothing. If a lock is held, return `cleanup_deferred`. Each result reports exact disposal/reuse semantics without claiming that arbitrary user files were removed.
 

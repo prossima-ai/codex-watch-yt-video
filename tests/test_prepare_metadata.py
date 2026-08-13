@@ -31,13 +31,11 @@ class PrepareMetadataTests(unittest.TestCase):
         self,
         root: Path,
         metadata_payload: dict[str, object],
-        caption_bodies: dict[str, str] | None = None,
     ) -> tuple[dict[str, str], Path]:
         binary_directory = root / "bin"
         binary_directory.mkdir()
         command_log = root / "commands.jsonl"
         payload_literal = repr(metadata_payload)
-        caption_bodies_literal = repr(caption_bodies or {})
         self.make_fake_tool(
             binary_directory,
             "yt-dlp",
@@ -47,8 +45,6 @@ import os
 from pathlib import Path
 import sys
 
-CAPTION_BODIES = {caption_bodies_literal}
-
 with Path(os.environ["WATCH_COMMAND_LOG"]).open("a", encoding="utf-8") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
 if "--version" in sys.argv:
@@ -56,19 +52,6 @@ if "--version" in sys.argv:
 elif "--verbose" in sys.argv:
     print("[debug] JS runtimes: node-24.10.0", file=sys.stderr)
     raise SystemExit(1)
-elif "--write-subs" in sys.argv or "--write-auto-subs" in sys.argv:
-    caption_type = "manual" if "--write-subs" in sys.argv else "automatic"
-    language = sys.argv[sys.argv.index("--sub-langs") + 1]
-    caption_format = sys.argv[sys.argv.index("--sub-format") + 1]
-    output_template = sys.argv[sys.argv.index("--output") + 1]
-    caption_body = CAPTION_BODIES.get(
-        f"{{caption_type}}:{{language}}:{{caption_format}}"
-    )
-    if caption_body is None:
-        caption_body = CAPTION_BODIES[f"{{caption_type}}:{{language}}"]
-    Path(output_template.replace("%(ext)s", caption_format)).write_text(
-        caption_body, encoding="utf-8"
-    )
 else:
     print(json.dumps({payload_literal}))
 """,
@@ -385,98 +368,16 @@ else:
             {"status": "available", "runtime": "node-24.10.0"},
         )
         self.assertIn("JavaScript support: `available`", outcome["report_markdown"])
-
-    def test_transcript_detail_downloads_only_a_sole_native_caption(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            environment, command_log = self.configure_fake_ytdlp(
-                root,
-                {
-                    "_type": "video",
-                    "id": "one",
-                    "duration": 2.0,
-                    "ext": "webm",
-                    "vcodec": "vp9",
-                    "acodec": "opus",
-                    "is_live": False,
-                    "automatic_captions": {
-                        "en": [{"ext": "vtt", "url": "https://cdn.example/en.vtt"}]
-                    },
-                },
-                {"automatic:en": "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nCaption text\n"},
-            )
-
-            outcome = self.run_request(
-                {
-                    "sources": ["https://video.example/watch?v=one"],
-                    "detail": "transcript",
-                    "source_network_approved": True,
-                },
-                env=environment,
-            )
-            invocations = self.read_invocations(command_log)
-
-        caption_invocation = next(
-            args for args in invocations if "--write-auto-subs" in args
+        self.assertTrue(outcome["workspace_id"].startswith("workspace_"))
+        self.assertIsNone(outcome["evidence_handle"])
+        self.assertEqual(outcome["disposal_state"], "retained")
+        self.assertEqual(outcome["reuse_state"], "none")
+        self.assertIn(
+            "Workspace reuse: `unavailable after this one-shot runtime exits`",
+            outcome["report_markdown"],
         )
-        self.assertIn("--skip-download", caption_invocation)
-        self.assertNotIn("--write-subs", caption_invocation)
-        self.assertEqual(outcome["state"], "ready")
-        self.assertEqual(outcome["coverage"]["transcript"], "complete")
-        self.assertEqual(
-            outcome["evidence"]["transcript"]["provenance"], "automatic_captions"
-        )
-        self.assertNotIn("Caption text", outcome["report_markdown"])
 
-    def test_transcript_detail_downloads_and_normalizes_a_sole_ttml_caption(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            environment, command_log = self.configure_fake_ytdlp(
-                root,
-                {
-                    "_type": "video",
-                    "id": "ttml",
-                    "duration": 2.0,
-                    "ext": "webm",
-                    "vcodec": "vp9",
-                    "acodec": "opus",
-                    "is_live": False,
-                    "subtitles": {
-                        "en": [{"ext": "ttml", "url": "https://cdn.example/en.ttml"}]
-                    },
-                },
-                {
-                    "manual:en:ttml": """<?xml version="1.0"?>
-<tt xmlns="http://www.w3.org/ns/ttml"><body><div>
-  <p begin="00:00:00.000" end="00:00:02.000">TTML caption text</p>
-</div></body></tt>
-"""
-                },
-            )
-
-            outcome = self.run_request(
-                {
-                    "sources": ["https://video.example/watch?v=ttml"],
-                    "detail": "transcript",
-                    "source_network_approved": True,
-                },
-                env=environment,
-            )
-            invocations = self.read_invocations(command_log)
-
-        caption_invocation = next(args for args in invocations if "--write-subs" in args)
-        self.assertIn("--skip-download", caption_invocation)
-        self.assertEqual(
-            caption_invocation[caption_invocation.index("--sub-format") + 1], "ttml"
-        )
-        self.assertEqual(outcome["state"], "ready")
-        self.assertEqual(outcome["coverage"]["transcript"], "complete")
-        self.assertEqual(
-            outcome["evidence"]["transcript"]["selected_track"]["format"], "ttml"
-        )
-        self.assertNotIn("TTML caption text", outcome["report_markdown"])
-
-    def test_selected_caption_is_scoped_to_its_runtime_session(self) -> None:
+    def test_cli_caption_choices_are_opaque_and_fresh_process_selections_do_not_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             environment, command_log = self.configure_fake_ytdlp(
@@ -496,10 +397,6 @@ else:
                         "fr": [{"ext": "vtt", "url": "https://cdn.example/fr.vtt"}]
                     },
                 },
-                {
-                    "manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nManual text\n",
-                    "automatic:fr": "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nAutomatic text\n",
-                },
             )
             initial = self.run_request(
                 {
@@ -510,73 +407,88 @@ else:
                 env=environment,
             )
             initial_invocations = self.read_invocations(command_log)
-            selected_choice = next(
-                choice
-                for choice in initial["choices"]
-                if choice["caption_type"] == "manual"
-            )
-            rejected_fresh_process = self.run_request(
+            rejected = self.run_request(
                 {
                     "sources": ["https://video.example/watch?v=one"],
                     "detail": "transcript",
                     "source_network_approved": True,
-                    "caption_track": selected_choice["id"],
+                    "caption_track": initial["choices"][0]["id"],
                     "prior_evidence": initial,
                 },
                 env=environment,
             )
-            invocations_after_fresh_rejection = self.read_invocations(command_log)
-
-            session = self.start_session(env=environment)
-            try:
-                session_initial = self.run_session_request(
-                    session,
-                    {
-                        "sources": ["https://video.example/watch?v=one"],
-                        "detail": "transcript",
-                        "source_network_approved": True,
-                    },
-                )
-                session_choice = next(
-                    choice
-                    for choice in session_initial["choices"]
-                    if choice["caption_type"] == "manual"
-                )
-                resumed = self.run_session_request(
-                    session,
-                    {
-                        "sources": ["https://video.example/watch?v=one"],
-                        "detail": "transcript",
-                        "source_network_approved": True,
-                        "caption_track": session_choice["id"],
-                        "prior_evidence": session_initial,
-                    },
-                )
-            finally:
-                self.stop_session(session)
-            invocations = self.read_invocations(command_log)
+            invocations_after_rejection = self.read_invocations(command_log)
 
         self.assertEqual(initial["state"], "decision_required")
         self.assertFalse(initial["terminal"])
         self.assertTrue(initial["decision_handle"].startswith("decision_"))
-        self.assertEqual(rejected_fresh_process["state"], "stopped")
+        self.assertIsNone(initial["evidence_handle"])
+        self.assertEqual(initial["reuse_state"], "none")
+        self.assertEqual(len(initial["choices"]), 2)
+        self.assertNotIn("cdn.example", json.dumps(initial, sort_keys=True))
         self.assertEqual(
-            rejected_fresh_process["failure"]["category"], "invalid_selection"
+            len([args for args in initial_invocations if "--dump-single-json" in args]),
+            1,
         )
-        self.assertEqual(initial_invocations, invocations_after_fresh_rejection)
-        self.assertEqual(session_initial["state"], "decision_required")
-        self.assertEqual(resumed["state"], "ready")
-        self.assertEqual(
-            resumed["evidence"]["transcript"]["provenance"], "manual_captions"
+        self.assertFalse(
+            any(
+                "--write-subs" in args or "--write-auto-subs" in args
+                for args in initial_invocations
+            )
         )
-        metadata_invocations = [
-            args for args in invocations if "--dump-single-json" in args
-        ]
-        self.assertEqual(len(metadata_invocations), 2)
-        caption_invocations = [args for args in invocations if "--write-subs" in args]
-        self.assertEqual(len(caption_invocations), 1)
-        self.assertIn("--skip-download", caption_invocations[0])
-        self.assertNotIn("--write-auto-subs", caption_invocations[0])
+        self.assertEqual(rejected["state"], "stopped")
+        self.assertEqual(rejected["failure"]["category"], "invalid_selection")
+        self.assertEqual(invocations_after_rejection, initial_invocations)
+
+    def test_session_reuses_an_opaque_handle_then_allows_explicit_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, command_log = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "id": "one",
+                    "duration": 2.0,
+                    "ext": "webm",
+                    "vcodec": "vp9",
+                    "acodec": "opus",
+                    "is_live": False,
+                },
+            )
+            session = self.start_session(env=environment)
+            try:
+                initial = self.run_session_request(
+                    session,
+                    {
+                        "sources": ["https://video.example/watch?v=one"],
+                        "detail": "transcript",
+                        "source_network_approved": True,
+                    },
+                )
+                invocations_before_reuse = self.read_invocations(command_log)
+                reused = self.run_session_request(
+                    session,
+                    {
+                        "sources": ["https://video.example/watch?v=one"],
+                        "question": "What remains available?",
+                        "source_network_approved": True,
+                        "prior_evidence": {
+                            "evidence_handle": initial["evidence_handle"]
+                        },
+                    },
+                )
+                cleaned = self.run_session_request(session, {"cleanup": "current"})
+            finally:
+                self.stop_session(session)
+            invocations_after_cleanup = self.read_invocations(command_log)
+
+        self.assertTrue(initial["evidence_handle"].startswith("evidence_"))
+        self.assertTrue(initial["workspace_id"].startswith("workspace_"))
+        self.assertNotIn("/", initial["evidence_handle"])
+        self.assertEqual(reused["evidence_handle"], initial["evidence_handle"])
+        self.assertEqual(invocations_before_reuse, invocations_after_cleanup)
+        self.assertEqual(cleaned["state"], "cleanup_incomplete")
+        self.assertEqual(cleaned["workspace_id"], initial["workspace_id"])
 
     def test_private_network_url_aliases_stop_during_validation(self) -> None:
         for host in ("127.0.0.1", "127.1", "2130706433", "0x7f000001"):
