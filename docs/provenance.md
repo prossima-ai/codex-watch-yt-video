@@ -24,21 +24,59 @@ for a caption request, provider request, deployment, publication, or release.
 | --- | --- | --- |
 | Governing decision | [Decision #44](https://github.com/prossima-ai/codex-watch-yt-video/issues/44) | It approves the fail-closed direct native-caption contract and release gates; it does not approve a live action. |
 | Pinned implementation base | `35a0c29bc9e264f533837adf40424aa95e55dcc1` | Canonical `origin/main` base for this implementation workflow and the squash commit from PR #45. |
-| Implementation commit | `PENDING — final local implementation commit has not yet been created` | Do not substitute a branch name, worktree HEAD, or an invented hash. Root records the intentional local commit only after final validation and reviews. |
-| Documentation and code changes | `PENDING root final validation` | The final record must name the direct-caption receipt, URL policy, redirects, redaction, byte cap, typed outcomes, no-fallback path, and transcription-disablement changes actually present in the final diff. |
-| Focused and complete validation | `PENDING root final validation` | Record exact commands, exit status, test count, static/package/skill checks, and any environment-limited checks after the final diff exists. |
-| Standards review | `PENDING root final validation` | An independent review must inspect the complete diff from the pinned base and record every finding and resolution. |
-| Spec review | `PENDING root final validation` | A separate independent review must inspect Decision #44, this specification, the prompt contract, and the complete diff. |
-| Transcription disablement | `PENDING root final validation` | Final evidence must show the release-facing action surface cannot read provider credentials, invoke provider clients, or route direct-caption outcomes into transcription. |
+| Implementation commit | `af11d98c59c0b42046f70a277b63457719bedf14` | Intentional local-only implementation commit on `codex/issue-44-direct-native-captions`; no push, PR, issue comment, label, release, provider, or live-media action occurred. |
+| Documentation and code changes | `recorded` | Adds the sealed receipt/network/fetch seams and hermetic coverage; updates the normative specification, public safety/setup/readme/notices, domain vocabulary, and release gates. The implementation binds receipts; validates public HTTPS and DNS; pins numeric addresses; fails closed on redirects and response caps; redacts sensitive caption URLs; retains typed outcomes; and removes release-facing transcription providers. |
+| Focused and complete validation | `PASS` | Baseline before edits: `python3 -m unittest discover -s tests` — 192 tests, exit 0. Final focused caption suites: 51 tests, exit 0. Complete suite: `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` — 227 tests, exit 0. See exact commands below. |
+| Standards review | `PASS — no unresolved findings` | Independent complete-diff review against `AGENTS.md`, domain docs, architecture, safety, tests, documentation, and maintainability; every actionable finding below was resolved and re-reviewed. |
+| Spec review | `PASS — no unresolved findings` | Independent complete-diff review against Decision #44, this specification, the implementation request, and authorization/release gates; every actionable finding below was resolved and re-reviewed. |
+| Transcription disablement | `PASS — release surface disabled` | `prepare_metadata.py` and `prepare_visual.py` use `release_transcription_providers()`, which returns no providers; tests prove no release-facing transcription choice, credential read, provider client, or direct-caption fallback. The provider-effective-size gate remains unresolved. |
 | Live public-caption validation | `BLOCKED` | No separate explicit human approval has been granted for one named public-caption run. Hermetic tests cannot replace it. |
 | Provider validation | `BLOCKED` | No human has selected one provider, no conservative effective complete-request-size limit has been accepted, and no separate provider approval has been granted. |
-| Human release decision | `PENDING` | A human must review the completed evidence and record either the specifically defined approved scope or the exact blockers. No decision has been made here. |
+| Release gate status | `BLOCKED` | Missing controls/evidence are: one separately approved live public-caption run with adequate sanitized evidence; conservative provider-specific complete-request-size limits; selected-provider validation under separate approval; and an explicit human release decision. |
+| Human release decision | `PENDING` | No human decision has been requested or received. A human must review this evidence and explicitly record either `Approved for the specifically defined release scope` or `Blocked`, with exact missing evidence or controls. |
 
 No live caption retrieval, live caption validation, transcription, provider
 credential read, provider request, provider validation, deployment, publication,
 or release occurred while creating this record. A future live public-caption
 approval applies only to the named one run; a future provider approval is a
 separate gate and cannot be inferred from it.
+
+### Local validation commands and limits
+
+All listed commands ran in the isolated Decision #44 worktree on 2026-08-15 and
+exited `0`.
+
+- Baseline before edits: `python3 -m unittest discover -s tests` — **192 tests**.
+- Focused native-caption implementation: `python3 -B -m unittest tests.test_caption_network tests.test_caption_evidence -v` — **51 tests**.
+- Complete required repository suite: `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` — **227 tests**.
+- Syntax/static package inputs: `python3 -B -m compileall -q .agents/skills/watch/scripts tests`.
+- Whitespace/formatting guard: `git diff --check 35a0c29bc9e264f533837adf40424aa95e55dcc1`.
+- Skill package/discovery validation: `python3 /Users/ashishpratapsingh/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/watch` — `Skill is valid!`.
+
+Repository inspection found no project lint, formatter, type-check, package, or
+CI manifest beyond these standard-library tests and the repository-owned skill
+validator, so no absent tool was represented as having run. These are hermetic
+or static checks: they do not prove live DNS, public-host behavior, redirect
+behavior, media compatibility, Codex Desktop discovery, provider behavior, or a
+release.
+
+### Independent review findings and resolutions
+
+Both reviews inspected the full diff from the pinned base independently. The
+following findings were resolved with repository evidence before the final
+re-reviews reported no unresolved findings.
+
+- **Standards:** known receipts were not burned for malformed/mismatched follow-ups; the runtime now invalidates the known receipt before every rejected use and tests its replay refusal.
+- **Standards and Spec:** unsafe native-caption routes could be treated as no captions and offer transcription; the runtime now returns a sanitized caption-policy outcome that blocks every transcription/provider path, with a never-called provider fixture.
+- **Standards:** `CONTEXT.md` omitted the caption-network action/receipt and still described active transcription; the canonical vocabulary now names the action and release-disabled transcription.
+- **Standards:** dataclass representations could expose signed caption URLs; candidates, probes, and selections now retain sealed `CaptionResource` objects with a redacted representation, and snapshot/repr tests cover them.
+- **Standards:** redirect-failure audit records could falsely say zero redirects; the bounded fetch error now carries only a safe numeric count, including a runtime same-origin-loop regression.
+- **Standards:** a shorter-than-declared response could parse as a caption; final EOF must now equal a valid declared length, and a valid-but-truncated VTT fails as typed transport failure.
+- **Spec:** early receipt/control/workspace failures, direct-caption visual continuation, error-category distinctions, and receipt expiry/replay boundaries were incomplete; explicit lifecycle, typed-outcome, controllable-clock, and visual-resume tests now cover them.
+- **Spec:** response read/close failures and nonzero `yt-dlp` metadata diagnostics could render sensitive URL material; response lifecycle errors map to safe transport failures and nonzero `yt-dlp` output is classified but never rendered.
+- **Spec:** the original `http.client` response framing and inherited `urllib` opener path could miss delayed bytes or close before definitive EOF; the sealed `urllib.request` handler now issues only a fixed direct GET, retains the raw response for bounded EOF checks, rejects altered request shape, and never forwards caller credentials/cookies.
+
+Final Standards and Spec reviews each reported `PASS — no unresolved findings`.
 
 ## Historical Issue #29 implementation and specification record
 

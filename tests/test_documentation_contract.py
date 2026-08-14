@@ -198,15 +198,18 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("No release-facing action surface may invoke", specification)
         self.assertIn("provider credentials or provider clients", specification)
 
-    def test_provenance_has_a_decision_44_pending_evidence_record(self) -> None:
+    def test_provenance_has_a_decision_44_completed_local_evidence_record(self) -> None:
         provenance = self._collapsed(PROVENANCE)
 
         for disclosure in (
             "Decision #44 implementation evidence record",
             "35a0c29bc9e264f533837adf40424aa95e55dcc1",
-            "PENDING — final local implementation commit has not yet been created",
-            "PENDING root final validation",
+            "af11d98c59c0b42046f70a277b63457719bedf14",
+            "227 tests",
+            "Standards review | `PASS — no unresolved findings`",
+            "Spec review | `PASS — no unresolved findings`",
             "Live public-caption validation | `BLOCKED`",
+            "Release gate status | `BLOCKED`",
             "Human release decision | `PENDING`",
         ):
             with self.subTest(disclosure=disclosure):
