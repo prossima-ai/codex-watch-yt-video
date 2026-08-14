@@ -490,6 +490,54 @@ else:
         self.assertEqual(cleaned["state"], "cleanup_incomplete")
         self.assertEqual(cleaned["workspace_id"], initial["workspace_id"])
 
+    def test_session_offers_explicit_provider_choices_without_reading_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, command_log = self.configure_fake_ytdlp(
+                root,
+                {
+                    "_type": "video",
+                    "id": "one",
+                    "duration": 2.0,
+                    "ext": "webm",
+                    "vcodec": "vp9",
+                    "acodec": "opus",
+                    "is_live": False,
+                    "subtitles": {},
+                    "automatic_captions": {},
+                },
+            )
+            environment.pop("OPENAI_API_KEY", None)
+            environment.pop("GROQ_API_KEY", None)
+            session = self.start_session(env=environment)
+            try:
+                outcome = self.run_session_request(
+                    session,
+                    {
+                        "sources": ["https://video.example/watch?v=one"],
+                        "detail": "transcript",
+                        "source_network_approved": True,
+                    },
+                )
+            finally:
+                self.stop_session(session)
+            invocations = self.read_invocations(command_log)
+
+        self.assertEqual(outcome["state"], "decision_required")
+        self.assertEqual(outcome["choice_kind"], "transcription")
+        self.assertEqual(
+            [
+                (choice["action"], choice["provider"], choice["model"])
+                for choice in outcome["choices"]
+            ],
+            [
+                ("none", None, None),
+                ("transcribe", "openai", "whisper-1"),
+                ("transcribe", "groq", "whisper-large-v3"),
+            ],
+        )
+        self.assertFalse(any("--format" in arguments for arguments in invocations))
+
     def test_private_network_url_aliases_stop_during_validation(self) -> None:
         for host in ("127.0.0.1", "127.1", "2130706433", "0x7f000001"):
             with self.subTest(host=host):
