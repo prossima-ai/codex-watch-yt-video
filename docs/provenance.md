@@ -75,6 +75,7 @@ re-reviews reported no unresolved findings.
 - **Spec:** early receipt/control/workspace failures, direct-caption visual continuation, error-category distinctions, and receipt expiry/replay boundaries were incomplete; explicit lifecycle, typed-outcome, controllable-clock, and visual-resume tests now cover them.
 - **Spec:** response read/close failures and nonzero `yt-dlp` metadata diagnostics could render sensitive URL material; response lifecycle errors map to safe transport failures and nonzero `yt-dlp` output is classified but never rendered.
 - **Spec:** the original `http.client` response framing and inherited `urllib` opener path could miss delayed bytes or close before definitive EOF; the sealed `urllib.request` handler now issues only a fixed direct GET, retains the raw response for bounded EOF checks, rejects altered request shape, and never forwards caller credentials/cookies.
+- **Spec (final evidence review):** the record initially conflated a blocked release gate with a human release decision; it now records `Release gate status: BLOCKED` separately from `Human release decision: PENDING`, so no unauthorized decision is implied.
 
 Final Standards and Spec reviews each reported `PASS — no unresolved findings`.
 
