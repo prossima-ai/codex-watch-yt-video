@@ -13,6 +13,9 @@ SECURITY_AND_PRIVACY = REPOSITORY_ROOT / "docs" / "security-and-privacy.md"
 SETUP_AND_TROUBLESHOOTING = REPOSITORY_ROOT / "docs" / "setup-and-troubleshooting.md"
 THIRD_PARTY_NOTICES = REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md"
 PROVENANCE = REPOSITORY_ROOT / "docs" / "provenance.md"
+SPECIFICATION = REPOSITORY_ROOT / "docs" / "spec" / "watch-skill.md"
+WATCH_SKILL = REPOSITORY_ROOT / ".agents" / "skills" / "watch" / "SKILL.md"
+DOMAIN_CONTEXT = REPOSITORY_ROOT / "CONTEXT.md"
 PUBLIC_DOCUMENTS = (
     README,
     SETUP_AND_TROUBLESHOOTING,
@@ -25,7 +28,7 @@ MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
 class DocumentationContractTests(unittest.TestCase):
     def test_security_and_privacy_is_a_classified_public_artifact(self) -> None:
-        document = SECURITY_AND_PRIVACY.read_text(encoding="utf-8")
+        document = self._collapsed(SECURITY_AND_PRIVACY)
 
         self.assertIn("# Security and privacy", document)
         self.assertIn("`confirmed`", document)
@@ -38,7 +41,7 @@ class DocumentationContractTests(unittest.TestCase):
     def test_security_document_discloses_source_and_local_processing_boundary(
         self,
     ) -> None:
-        document = SECURITY_AND_PRIVACY.read_text(encoding="utf-8")
+        document = self._collapsed(SECURITY_AND_PRIVACY)
 
         for disclosure in (
             "yt-dlp-compatible HTTP(S) URL",
@@ -74,22 +77,145 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_docs_distinguish_media_download_and_caption_contact_paths(self) -> None:
         readme = README.read_text(encoding="utf-8")
-        security = SECURITY_AND_PRIVACY.read_text(encoding="utf-8")
+        security = self._collapsed(SECURITY_AND_PRIVACY)
 
         self.assertRegex(
             readme, r"not a general-purpose downloader\s+or\s+export tool"
         )
         self.assertRegex(
             security,
-            r"directly retrieves the selected public HTTP\(S\) caption resource",
+            r"directly retrieves the selected public HTTPS caption resource",
         )
         self.assertIn("not every source contact goes through `yt-dlp`", security)
         self.assertIn("release/spec gate", security)
 
+    def test_direct_caption_network_action_has_a_separate_bound_receipt_contract(
+        self,
+    ) -> None:
+        specification = self._collapsed(SPECIFICATION)
+        security = self._collapsed(SECURITY_AND_PRIVACY)
+        setup = self._collapsed(SETUP_AND_TROUBLESHOOTING)
+        skill = self._collapsed(WATCH_SKILL)
+
+        for disclosure in (
+            "separate, explicit approval-gated caption-network action",
+            "opaque, single-use approval receipt",
+            "five minutes or request end, whichever comes first",
+            "same Watch request, source, runtime session, workspace",
+            "selected caption track, supported format, byte cap",
+            "exact normalized HTTPS origin",
+            "Receipt verification MUST occur before any DNS or HTTP request",
+            "zero outbound caption HTTP attempts",
+            "Failure, cancellation, denial, or retry invalidates",
+            "`urllib.request` HTTPS path",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, specification)
+
+        for disclosure in (
+            "caption hostname, purpose, selected track, format, and byte cap",
+            "must not display, log, persist as evidence, or accept back as user input",
+            "raw signed caption URL",
+            "query strings, credentials, tokens",
+            "user-facing outcome, exception, diagnostic, snapshot, or log",
+            "sealed Python `urllib.request` HTTPS path",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, security)
+
+        self.assertIn("caption_network_approval", skill)
+        self.assertIn("separate native-caption network action", setup)
+        self.assertIn("only action handle", specification)
+
+    def test_direct_caption_network_policy_is_fail_closed_and_never_transcribes(
+        self,
+    ) -> None:
+        specification = self._collapsed(SPECIFICATION)
+        security = self._collapsed(SECURITY_AND_PRIVACY)
+
+        for disclosure in (
+            "public HTTPS",
+            "embedded credentials",
+            "IP literals",
+            "nonstandard ports",
+            "all resolved IPv4 and IPv6 addresses",
+            "revalidated at every redirect hop",
+            "strict redirect limit of three",
+            "redirect loop",
+            "HTTPS-to-HTTP downgrade",
+            "new otherwise-public origin returns `decision_required`",
+            "Never forward sensitive authorization information",
+            "Content-Length",
+            "actual streamed bytes",
+            "exact byte-cap boundary",
+            "partial caption data as success",
+            "never invokes transcription",
+            "provider credential",
+            "provider client",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, specification)
+
+        for disclosure in (
+            "success (`ready`)",
+            "denial (`stopped`)",
+            "unavailability (`partial`)",
+            "failure (`partial`)",
+            "does not fall back to transcription",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, security)
+
+    def test_domain_context_names_the_caption_network_action_and_release_disabled_transcription(self) -> None:
+        context = self._collapsed(DOMAIN_CONTEXT)
+
+        for disclosure in (
+            "direct caption-network action",
+            "Caption-network action",
+            "Native-caption approval receipt",
+            "single-use same-session receipt",
+            "Release-facing transcription is disabled",
+            "does not offer `transcription`",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, context)
+
+    def test_transcription_is_release_disabled_pending_effective_request_size_gate(
+        self,
+    ) -> None:
+        specification = self._collapsed(SPECIFICATION)
+        security = self._collapsed(SECURITY_AND_PRIVACY)
+        notices = self._collapsed(THIRD_PARTY_NOTICES)
+        skill = self._collapsed(WATCH_SKILL)
+
+        for document in (specification, security, notices, skill):
+            with self.subTest(document=document[:40]):
+                self.assertIn("release-disabled", document)
+                self.assertIn("multipart/form-data", document)
+                self.assertIn("not merely nominal media-file size", document)
+                self.assertIn("separate explicit human approval", document)
+
+        self.assertIn("No release-facing action surface may invoke", specification)
+        self.assertIn("provider credentials or provider clients", specification)
+
+    def test_provenance_has_a_decision_44_pending_evidence_record(self) -> None:
+        provenance = self._collapsed(PROVENANCE)
+
+        for disclosure in (
+            "Decision #44 implementation evidence record",
+            "35a0c29bc9e264f533837adf40424aa95e55dcc1",
+            "PENDING — final local implementation commit has not yet been created",
+            "PENDING root final validation",
+            "Live public-caption validation | `BLOCKED`",
+            "Human release decision | `PENDING`",
+        ):
+            with self.subTest(disclosure=disclosure):
+                self.assertIn(disclosure, provenance)
+
     def test_security_document_requires_distinct_provider_and_secret_gates(
         self,
     ) -> None:
-        document = SECURITY_AND_PRIVACY.read_text(encoding="utf-8")
+        document = self._collapsed(SECURITY_AND_PRIVACY)
 
         for disclosure in (
             "`decision_required`",
@@ -143,7 +269,7 @@ class DocumentationContractTests(unittest.TestCase):
         )
 
     def test_readme_states_classified_scope_and_verification_limits(self) -> None:
-        readme = README.read_text(encoding="utf-8")
+        readme = self._collapsed(README)
 
         for disclosure in (
             "Claim classification",
@@ -160,11 +286,11 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(disclosure=disclosure):
                 self.assertIn(disclosure, readme)
         self.assertRegex(
-            readme, r"source-host and\s+provider-network approvals are separate"
+            readme.casefold(), r"source-host and\s+provider-network approvals are separate"
         )
 
     def test_setup_preserves_manual_refusals_and_explains_approval_flow(self) -> None:
-        setup = SETUP_AND_TROUBLESHOOTING.read_text(encoding="utf-8")
+        setup = self._collapsed(SETUP_AND_TROUBLESHOOTING)
 
         for disclosure in (
             "Claim classification",
@@ -182,7 +308,7 @@ class DocumentationContractTests(unittest.TestCase):
             "Never overwrite, remove, repair, force",
             "Do not mutate global configuration",
             "Do not install or update a dependency",
-            "fresh provider-specific audio-upload consent",
+            "Transcription is release-disabled",
             "provider-network approval",
             "No live Desktop probe, personal installation, media acquisition, or "
             "provider request was performed for #28",
@@ -338,6 +464,10 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertTrue(target.is_file(), f"missing internal target: {target}")
                 if anchor:
                     self.assertIn(anchor, self._heading_slugs(target))
+
+    @staticmethod
+    def _collapsed(document_path: Path) -> str:
+        return re.sub(r"\s+", " ", document_path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _heading_slugs(document_path: Path) -> set[str]:

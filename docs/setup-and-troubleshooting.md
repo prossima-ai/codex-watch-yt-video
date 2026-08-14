@@ -95,19 +95,40 @@ Before any future live Desktop or outside-workspace probe, show the exact path a
 
 ## Preflight and approval flow
 
-**Classification: implementation requirement. Evidence:** specification [sections 3, 4, and 8](spec/watch-skill.md#8-optional-transcription-consent-secrets-and-retries) and hermetic tests in `tests/test_prepare_metadata.py` and `tests/test_provider_transcription.py`.
+**Classification: implementation requirement. Evidence:** Decision #44,
+[specification sections 3, 4, 6, and 8](spec/watch-skill.md#direct-native-caption-retrieval),
+and hermetic tests. This procedure does not authorize or prove a live source,
+caption, provider, or release action.
 
 1. Validate exactly one supported source before acquisition. For a public,
    unauthenticated yt-dlp-compatible HTTP(S) URL, show that `yt-dlp` would
    contact its named host and obtain separate source-host command-network
-   approval first. A selected native-caption resource can then be retrieved
-   directly under that same approved source-network action; this is a documented
-   release/spec gate, not a separate approval this procedure can grant. A local
-   file does not grant extra authority.
-2. Let preflight report missing `yt-dlp`, FFmpeg/ffprobe, or runtime support with typed guidance. Do not install or update a dependency, change a package manager, or treat a selected skill as permission to run a command.
-3. Prefer captions. If optional transcription could help, obtain a user provider choice and audio-track selection where needed; a credential does not choose a provider.
-4. After a named provider and track are selected, show the destination, current privacy link, selected track, estimated bytes/duration, possible chunking, and audio-only boundary. Then obtain fresh provider-specific audio-upload consent.
-5. Only after that consent succeeds, request separate provider-network approval. Source-host command-network approval, provider choice, fresh consent, and provider-network approval remain separate; denial at any gate stops before the relevant work.
+   approval first. That approval does not authorize the selected native-caption
+   endpoint. A local file does not grant extra authority.
+2. After a selected native caption exposes a safe public HTTPS resource, return a
+   separate native-caption network action. Show only its hostname, purpose,
+   selected track, supported format, byte cap, and opaque receipt. Never show or
+   ask the user to return a signed caption URL, query string, credential, or
+   token. The receipt is single use, bound to the same request/source/session/
+   workspace/track/format/cap/origin, expires after five minutes or request end,
+   and is invalidated on use, denial, cancellation, failure, retry, or mismatch.
+   Verify it before DNS or HTTP; invalid receipt attempts make no outbound caption
+   request.
+3. Treat `approved`, `declined`, and `canceled` as the direct action's only
+   decisions. Denial is terminal `stopped`; cancellation is `canceled`; a new
+   otherwise-public redirect origin needs a new `decision_required` receipt.
+   Unsafe, malformed, downgrade, looping, or over-limit redirects fail closed.
+   A direct caption failure or unavailability never starts transcription.
+4. Let preflight report missing `yt-dlp`, FFmpeg/ffprobe, or runtime support with
+   typed guidance. Do not install or update a dependency, change a package
+   manager, or treat a selected skill as permission to run a command.
+5. Transcription is release-disabled. Do not offer a provider choice, read a
+   provider credential, extract audio, or request provider-network approval. A
+   future provider needs a conservative provider-specific complete request-size
+   limit—not merely nominal media-file size—including multipart/form-data
+   boundaries, per-part headers, metadata, and every other request-body overhead,
+   then a human-selected provider, a separate validation plan, and separate
+   explicit human approval immediately before that provider activity.
 
 Do not request secrets in chat, scan `.env`, or make a provider request to diagnose credentials. Read [security and privacy](security-and-privacy.md) for the data boundary, outcome vocabulary, and validated cleanup protocol.
 
@@ -115,7 +136,7 @@ Do not request secrets in chat, scan `.env`, or make a provider request to diagn
 
 **Classification: implementation requirement. Evidence:** specification [sections 9–10](spec/watch-skill.md#10-workspace-retention-reuse-and-cleanup) and hermetic lifecycle tests only.
 
-- `decision_required` and `consent_required` are nonterminal requests for a specific choice; do not guess a selection or send a request while waiting.
+- `decision_required` and `consent_required` are nonterminal requests for a specific choice; do not guess a selection or send a request while waiting. A `caption_network` decision is the separate direct-caption action, not permission to retry or to contact a different host.
 - `stopped`, `failed`, and `canceled` are terminal outcomes. A truthful `partial` outcome can retain named evidence but must disclose coverage, answerability, gaps, and disposal state.
 - Evidence reuse is same-task-only. It does not authorize automatic reacquisition, more extraction, provider upload, or automatic deletion.
 - Cleanup is explicit and fail closed. `cleanup_deferred`, `cleanup_refused`, `cleanup_incomplete`, `cleanup_succeeded`, and `cleanup_already_absent` have the meanings documented in [security and privacy](security-and-privacy.md#explicit-cleanup-only). On macOS, `cleanup_incomplete` preserves a validated workspace rather than risking an unsafe delete.

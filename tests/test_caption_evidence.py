@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -14,9 +15,22 @@ sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 from watch_evidence import (  # noqa: E402
     CommandResult,
+    MetadataEvidence,
     TranscriptSegment,
     WatchEvidenceRuntime,
+    _SourceProbe,
+    _caption_candidates_from_ytdlp,
 )
+from watch_caption_network import (  # noqa: E402
+    BoundedCaptionFetcher,
+    CaptionNetworkError,
+    CaptionRedirectApprovalRequired,
+    CaptionResource,
+    CaptionResponseTooLarge,
+    CaptionUnavailable,
+    caption_resource,
+)
+from watch_transcription import ProviderDescriptor  # noqa: E402
 
 
 class CaptionRunner:
@@ -25,6 +39,7 @@ class CaptionRunner:
         self.caption_bodies = caption_bodies
         self.invocations: list[tuple[str, list[str]]] = []
         self.caption_fetches: list[str] = []
+        self.caption_resource_reprs: list[str] = []
 
     def run(
         self,
@@ -46,7 +61,9 @@ class CaptionRunner:
 
         return CommandResult(1, "", "Unexpected command")
 
-    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None:
+    def fetch(self, resource: CaptionResource, output_fd: int, *, max_bytes: int) -> None:
+        self.caption_resource_reprs.append(repr(resource))
+        url = resource._url
         catalogues = (
             ("manual", self.metadata.get("subtitles")),
             ("automatic", self.metadata.get("automatic_captions")),
@@ -80,6 +97,223 @@ class CaptionRunner:
         return self.caption_fetches
 
 
+class MetadataFailureRunner(CaptionRunner):
+    def __init__(self, diagnostic: str) -> None:
+        super().__init__(captioned_metadata(), {})
+        self.diagnostic = diagnostic
+
+    def run(
+        self,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
+        if "--dump-single-json" in arguments:
+            self.invocations.append((executable, list(arguments)))
+            return CommandResult(1, "", self.diagnostic)
+        return super().run(
+            executable, arguments, input_fd=input_fd, output_fd=output_fd
+        )
+
+
+class CaptionVisualRunner(CaptionRunner):
+    """Hermetic source-media and frame fixture for caption-resume visual tests."""
+
+    def run(
+        self,
+        executable: str,
+        arguments: Sequence[str],
+        *,
+        input_fd: int | None = None,
+        output_fd: int | None = None,
+    ) -> CommandResult:
+        copied_arguments = list(arguments)
+        if (
+            "--version" in copied_arguments
+            or "-version" in copied_arguments
+            or "--verbose" in copied_arguments
+            or "--dump-single-json" in copied_arguments
+        ):
+            return super().run(
+                executable,
+                copied_arguments,
+                input_fd=input_fd,
+                output_fd=output_fd,
+            )
+        self.invocations.append((executable, copied_arguments))
+        if "--format" in copied_arguments and "--output" in copied_arguments:
+            assert output_fd is not None
+            os.write(output_fd, b"synthetic-media")
+            return CommandResult(0, "", "")
+        if "-show_entries" in copied_arguments:
+            is_frame = (
+                input_fd is not None
+                and os.pread(input_fd, 1024, 0).startswith(b"synthetic-jpeg")
+            )
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "codec_name": "mjpeg" if is_frame else "h264",
+                                "width": 768 if is_frame else 1920,
+                                "height": 432 if is_frame else 1080,
+                                "sample_aspect_ratio": "1:1",
+                                "display_aspect_ratio": "16:9",
+                            }
+                        ]
+                    }
+                ),
+                "",
+            )
+        if "-frames:v" in copied_arguments:
+            assert output_fd is not None
+            os.write(output_fd, b"synthetic-jpeg")
+            return CommandResult(0, "", "")
+        return CommandResult(1, "", "Unexpected visual command")
+
+
+class MutableClock:
+    def __init__(self, now: float = 10.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FailingCaptionRunner(CaptionRunner):
+    def fetch(self, resource: CaptionResource, output_fd: int, *, max_bytes: int) -> None:
+        del output_fd, max_bytes
+        self.caption_resource_reprs.append(repr(resource))
+        url = resource._url
+        self.caption_fetches.append(url)
+        raise OSError("signed-caption-url?secret=never-render")
+
+
+class RaisingCaptionRunner(CaptionRunner):
+    def __init__(
+        self,
+        metadata: dict[str, object],
+        error: Exception,
+    ) -> None:
+        super().__init__(metadata, {})
+        self.error = error
+
+    def fetch(self, resource: CaptionResource, output_fd: int, *, max_bytes: int) -> None:
+        del output_fd, max_bytes
+        self.caption_resource_reprs.append(repr(resource))
+        url = resource._url
+        self.caption_fetches.append(url)
+        raise self.error
+
+
+class _RedirectResponse:
+    def __init__(self, location: str) -> None:
+        self.status = 302
+        self.headers = {"Location": location}
+
+    def read(self, size: int) -> bytes:
+        del size
+        raise AssertionError("A redirect response body must not be read.")
+
+    def close(self) -> None:
+        pass
+
+
+class SameOriginRedirectLoopCaptionFetcher:
+    """Hermetic real bounded-fetch seam: one safe hop then a safe loop."""
+
+    def __init__(self) -> None:
+        self.transport_resource_reprs: list[str] = []
+        self._responses = [
+            _RedirectResponse("/loop.vtt"),
+            _RedirectResponse("/manual.vtt?token=caption-secret"),
+        ]
+        self._fetcher = BoundedCaptionFetcher(resolver=self, transport=self)
+
+    def resolve(self, hostname: str, port: int) -> tuple[str, ...]:
+        if hostname != "cdn.example" or port != 443:
+            raise AssertionError("Unexpected redirected caption destination")
+        return ("8.8.8.8",)
+
+    def open(
+        self, resource: CaptionResource, addresses: tuple[str, ...]
+    ) -> _RedirectResponse:
+        if addresses != ("8.8.8.8",) or not self._responses:
+            raise AssertionError("Unexpected caption HTTP attempt")
+        self.transport_resource_reprs.append(repr(resource))
+        return self._responses.pop(0)
+
+    def fetch(self, resource: CaptionResource, output_fd: int, *, max_bytes: int) -> object:
+        return self._fetcher.fetch(resource, output_fd, max_bytes=max_bytes)
+
+
+class RedirectingCaptionRunner(CaptionRunner):
+    def __init__(self, metadata: dict[str, object], caption_bodies: dict[str, str]) -> None:
+        super().__init__(metadata, caption_bodies)
+        self.redirected = False
+
+    def fetch(self, resource: CaptionResource, output_fd: int, *, max_bytes: int) -> None:
+        self.caption_resource_reprs.append(repr(resource))
+        url = resource._url
+        if not self.redirected:
+            self.redirected = True
+            self.caption_fetches.append(url)
+            raise CaptionRedirectApprovalRequired(
+                caption_resource("https://other-captions.example/next.vtt?token=redirect-secret")
+            )
+        payload = self.caption_bodies["manual:en"].encode("utf-8")
+        if len(payload) > max_bytes:
+            raise OSError("Fixture caption exceeds the safe limit.")
+        while payload:
+            written = os.write(output_fd, payload)
+            payload = payload[written:]
+        self.caption_fetches.append(url)
+
+
+class NeverCalledProvider:
+    descriptor = ProviderDescriptor(
+        provider="openai",
+        model="whisper-1",
+        destination="https://api.openai.example/v1/audio/transcriptions",
+        privacy_url="https://api.openai.example/privacy",
+        max_chunk_bytes=8,
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transcribe_chunk(self, upload: object) -> object:
+        del upload
+        self.calls += 1
+        raise AssertionError("Direct caption retrieval must not call a provider")
+
+
+class AutoApprovingCaptionRuntime:
+    """Test harness for parser-focused tests after the explicit approval boundary."""
+
+    def __init__(self, runtime: WatchEvidenceRuntime) -> None:
+        self._runtime = runtime
+
+    def prepare(
+        self, request: dict[str, object], prior_evidence: object | None = None
+    ) -> object:
+        outcome = self._runtime.prepare(request, prior_evidence=prior_evidence)
+        if outcome.choice_kind != "caption_network":
+            return outcome
+        assert outcome.caption_network_approval is not None
+        approved_request = dict(request)
+        approved_request.pop("caption_track", None)
+        approved_request["caption_network_approval"] = {
+            "receipt": outcome.caption_network_approval.receipt,
+            "decision": "approved",
+        }
+        return self._runtime.prepare(approved_request, prior_evidence=outcome)
+
+
 def fake_executable(name: str) -> str:
     return f"/fake/{name}"
 
@@ -109,13 +343,15 @@ class CaptionEvidenceTests(unittest.TestCase):
 
     def make_runtime(
         self, metadata: dict[str, object], caption_bodies: dict[str, str]
-    ) -> tuple[WatchEvidenceRuntime, CaptionRunner]:
+    ) -> tuple[AutoApprovingCaptionRuntime, CaptionRunner]:
         runner = CaptionRunner(metadata, caption_bodies)
         return (
-            WatchEvidenceRuntime(
-                command_runner=runner,
-                caption_fetcher=runner,
-                find_executable=fake_executable,
+            AutoApprovingCaptionRuntime(
+                WatchEvidenceRuntime(
+                    command_runner=runner,
+                    caption_fetcher=runner,
+                    find_executable=fake_executable,
+                )
             ),
             runner,
         )
@@ -127,6 +363,516 @@ class CaptionEvidenceTests(unittest.TestCase):
             "detail": "transcript",
             **controls,
         }
+
+    def test_direct_caption_network_action_requires_a_fresh_opaque_receipt_before_fetch(self) -> None:
+        clock = MutableClock()
+        runtime, runner = self.make_runtime(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt?token=secret"}]},
+                duration=1.0,
+            ),
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+            clock=clock,
+        )
+
+        approval = runtime.prepare(self.request())
+        serialized_approval = json.dumps(approval.to_dict(), sort_keys=True)
+
+        self.assertEqual(approval.state, "decision_required")
+        self.assertEqual(approval.choice_kind, "caption_network")
+        self.assertFalse(approval.terminal)
+        self.assertIsNotNone(approval.caption_network_approval)
+        self.assertIsNone(approval.decision_handle)
+        self.assertEqual(runner.caption_fetches, [])
+        self.assertIn("cdn.example", serialized_approval)
+        self.assertNotIn("token=secret", serialized_approval)
+        self.assertNotIn("expires_in_seconds", serialized_approval)
+
+        completed = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+
+        self.assertEqual(completed.state, "ready")
+        self.assertEqual(runner.caption_fetches, ["https://cdn.example/manual.vtt?token=secret"])
+        self.assertEqual(
+            runner.caption_resource_reprs,
+            ["CaptionResource(origin=CaptionOrigin(hostname='cdn.example', port=443))"],
+        )
+        self.assertNotIn("token=secret", json.dumps(completed.to_dict(), sort_keys=True))
+
+    def test_invalid_or_expired_caption_receipts_make_zero_fetch_attempts(self) -> None:
+        clock = MutableClock()
+        runner = CaptionRunner(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]}
+            ),
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+            clock=clock,
+        )
+        approval = runtime.prepare(self.request())
+
+        malformed = runtime.prepare(
+            self.request(
+                caption_network_approval={"receipt": "caption_receipt_tampered", "decision": "approved"}
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(malformed.state, "stopped")
+        self.assertEqual(malformed.failure.category, "caption_approval_invalid")
+        self.assertEqual(runner.caption_fetches, [])
+
+        clock.now += 300
+        expired = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(expired.state, "stopped")
+        self.assertEqual(expired.failure.category, "caption_approval_expired")
+        self.assertEqual(runner.caption_fetches, [])
+
+        malformed_runner = CaptionRunner(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]}
+            ),
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        malformed_runtime = WatchEvidenceRuntime(
+            command_runner=malformed_runner,
+            caption_fetcher=malformed_runner,
+            find_executable=fake_executable,
+        )
+        malformed_approval = malformed_runtime.prepare(self.request())
+        tampered = malformed_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": malformed_approval.caption_network_approval.receipt,
+                    "decision": "tampered",
+                }
+            ),
+            prior_evidence=malformed_approval,
+        )
+        replayed = malformed_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": malformed_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=malformed_approval,
+        )
+        self.assertEqual(tampered.state, "stopped")
+        self.assertEqual(replayed.state, "stopped")
+        self.assertEqual(malformed_runner.caption_fetches, [])
+
+        ended_runner = CaptionRunner(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]}
+            ),
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        ended_runtime = WatchEvidenceRuntime(
+            command_runner=ended_runner,
+            caption_fetcher=ended_runner,
+            find_executable=fake_executable,
+        )
+        ended_approval = ended_runtime.prepare(self.request())
+        ended_runtime.close()
+        ended = ended_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": ended_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=ended_approval,
+        )
+        self.assertEqual(ended.state, "stopped")
+        self.assertEqual(ended_runner.caption_fetches, [])
+
+    def test_rejected_caption_network_followups_burn_a_known_receipt_before_fetch(self) -> None:
+        metadata = captioned_metadata(
+            subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]}
+        )
+        body = {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"}
+
+        malformed_runner = CaptionRunner(metadata, body)
+        malformed_runtime = WatchEvidenceRuntime(
+            command_runner=malformed_runner,
+            caption_fetcher=malformed_runner,
+            find_executable=fake_executable,
+        )
+        malformed_approval = malformed_runtime.prepare(self.request())
+        malformed = malformed_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": malformed_approval.caption_network_approval.receipt,
+                    "decision": ["approved"],
+                }
+            ),
+            prior_evidence=malformed_approval,
+        )
+        malformed_replay = malformed_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": malformed_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=malformed_approval,
+        )
+        self.assertEqual(malformed.state, "stopped")
+        self.assertEqual(malformed_replay.state, "stopped")
+        self.assertEqual(malformed_runner.caption_fetches, [])
+
+        prior_runner = CaptionRunner(metadata, body)
+        prior_runtime = WatchEvidenceRuntime(
+            command_runner=prior_runner,
+            caption_fetcher=prior_runner,
+            find_executable=fake_executable,
+        )
+        prior_approval = prior_runtime.prepare(self.request())
+        altered_prior = prior_approval.to_dict()
+        altered_prior["caption_network_approval"]["byte_cap"] = 1
+        rejected_prior = prior_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": prior_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=altered_prior,
+        )
+        prior_replay = prior_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": prior_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=prior_approval,
+        )
+        self.assertEqual(rejected_prior.state, "stopped")
+        self.assertEqual(prior_replay.state, "stopped")
+        self.assertEqual(prior_runner.caption_fetches, [])
+
+    def test_caption_denial_is_terminal_and_direct_caption_failure_never_offers_or_calls_transcription(self) -> None:
+        runner = FailingCaptionRunner(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt?token=secret"}]}
+            ),
+            {},
+        )
+        provider = NeverCalledProvider()
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+            transcription_providers={"openai": provider},
+        )
+        approval = runtime.prepare(self.request())
+
+        denied = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": approval.caption_network_approval.receipt,
+                    "decision": "declined",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(denied.state, "stopped")
+        self.assertEqual(denied.failure.category, "caption_approval_declined")
+        self.assertEqual(runner.caption_fetches, [])
+
+        retry_runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+            transcription_providers={"openai": provider},
+        )
+        retry_approval = retry_runtime.prepare(self.request())
+        failed = retry_runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": retry_approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=retry_approval,
+        )
+        serialized_failure = json.dumps(failed.to_dict(), sort_keys=True)
+        self.assertEqual(failed.state, "partial")
+        self.assertIsNone(failed.choice_kind)
+        self.assertEqual(provider.calls, 0)
+        self.assertNotIn("token=secret", serialized_failure)
+
+    def test_unsafe_caption_route_is_a_typed_partial_and_never_offers_transcription(self) -> None:
+        provider = NeverCalledProvider()
+        runner = CaptionRunner(
+            captioned_metadata(
+                subtitles={
+                    "en": [
+                        {
+                            "ext": "vtt",
+                            "url": "https://127.0.0.1/private.vtt?token=never-render",
+                        }
+                    ]
+                }
+            ),
+            {},
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+            transcription_providers={"openai": provider},
+        )
+
+        outcome = runtime.prepare(self.request())
+        payload = json.dumps(outcome.to_dict(), sort_keys=True)
+
+        self.assertEqual(outcome.state, "partial")
+        self.assertIsNone(outcome.choice_kind)
+        self.assertIsNotNone(outcome.failure)
+        self.assertEqual(outcome.failure.category, "caption_url_policy")
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(runner.caption_fetches, [])
+        self.assertNotIn("127.0.0.1", payload)
+        self.assertNotIn("never-render", payload)
+
+    def test_caption_network_failure_categories_are_typed_and_sanitized(self) -> None:
+        metadata = captioned_metadata(
+            subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt?token=secret"}]}
+        )
+        cases: tuple[tuple[Exception, str, str, int], ...] = (
+            (CaptionUnavailable(), "unavailable", "caption_unavailable", 0),
+            (CaptionResponseTooLarge(), "response_too_large", "caption_response_too_large", 0),
+            (CaptionNetworkError("http_failure"), "http_failed", "caption_http", 0),
+            (CaptionNetworkError("transport_failure"), "transport_failed", "caption_transport", 0),
+            (CaptionNetworkError("unsafe_destination"), "url_policy_failed", "caption_url_policy", 0),
+            (
+                CaptionNetworkError("redirect_loop", redirect_count=1),
+                "redirect_failed",
+                "caption_redirect",
+                1,
+            ),
+            (OSError("https://cdn.example/manual.vtt?token=secret"), "transport_failed", "caption_transport", 0),
+        )
+        for error, expected_status, expected_category, expected_redirect_count in cases:
+            with self.subTest(error=type(error).__name__):
+                runner = RaisingCaptionRunner(metadata, error)
+                runtime = WatchEvidenceRuntime(
+                    command_runner=runner,
+                    caption_fetcher=runner,
+                    find_executable=fake_executable,
+                )
+                approval = runtime.prepare(self.request())
+                outcome = runtime.prepare(
+                    self.request(
+                        caption_network_approval={
+                            "receipt": approval.caption_network_approval.receipt,
+                            "decision": "approved",
+                        }
+                    ),
+                    prior_evidence=approval,
+                )
+                payload = json.dumps(outcome.to_dict(), sort_keys=True)
+                self.assertEqual(outcome.state, "partial")
+                self.assertEqual(outcome.caption_network_audit.status, expected_status)
+                self.assertEqual(
+                    outcome.caption_network_audit.redirect_count, expected_redirect_count
+                )
+                self.assertEqual(outcome.failure.category, expected_category)
+                self.assertNotIn("token=secret", payload)
+
+    def test_same_origin_redirect_loop_keeps_a_truthful_sanitized_redirect_audit(self) -> None:
+        caption_url = "https://cdn.example/manual.vtt?token=caption-secret"
+        command_runner = CaptionRunner(
+            captioned_metadata(subtitles={"en": [{"ext": "vtt", "url": caption_url}]}),
+            {},
+        )
+        caption_fetcher = SameOriginRedirectLoopCaptionFetcher()
+        runtime = WatchEvidenceRuntime(
+            command_runner=command_runner,
+            caption_fetcher=caption_fetcher,
+            find_executable=fake_executable,
+        )
+        approval = runtime.prepare(self.request())
+
+        outcome = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": approval.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        observable = json.dumps(outcome.to_dict(), sort_keys=True) + outcome.report_markdown
+
+        self.assertEqual(outcome.state, "partial")
+        self.assertEqual(outcome.failure.category, "caption_redirect")
+        self.assertEqual(outcome.caption_network_audit.status, "redirect_failed")
+        self.assertEqual(outcome.caption_network_audit.redirect_count, 1)
+        self.assertEqual(len(caption_fetcher.transport_resource_reprs), 2)
+        self.assertNotIn("manual.vtt", observable)
+        self.assertNotIn("loop.vtt", observable)
+        self.assertNotIn("caption-secret", observable)
+        self.assertTrue(
+            all("caption-secret" not in value for value in caption_fetcher.transport_resource_reprs)
+        )
+
+    def test_caption_network_resume_preserves_visual_evidence_after_approval_and_denial(self) -> None:
+        metadata = captioned_metadata(
+            subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]},
+            duration=1.0,
+        )
+        body = {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"}
+
+        approved_runner = CaptionVisualRunner(metadata, body)
+        approved_runtime = WatchEvidenceRuntime(
+            command_runner=approved_runner,
+            caption_fetcher=approved_runner,
+            find_executable=fake_executable,
+        )
+        approved_prompt = approved_runtime.prepare(
+            self.request(detail="transcript", cues=[0])
+        )
+        approved = approved_runtime.prepare(
+            self.request(
+                detail="transcript",
+                cues=[0],
+                caption_network_approval={
+                    "receipt": approved_prompt.caption_network_approval.receipt,
+                    "decision": "approved",
+                },
+            ),
+            prior_evidence=approved_prompt,
+        )
+        self.assertEqual(approved.state, "partial")
+        self.assertIsNotNone(approved.evidence.visual)
+        self.assertEqual(len(approved.evidence.visual.frames), 1)
+
+        denied_runner = CaptionVisualRunner(metadata, body)
+        denied_runtime = WatchEvidenceRuntime(
+            command_runner=denied_runner,
+            caption_fetcher=denied_runner,
+            find_executable=fake_executable,
+        )
+        denied_prompt = denied_runtime.prepare(self.request(detail="transcript", cues=[0]))
+        denied = denied_runtime.prepare(
+            self.request(
+                detail="transcript",
+                cues=[0],
+                caption_network_approval={
+                    "receipt": denied_prompt.caption_network_approval.receipt,
+                    "decision": "declined",
+                },
+            ),
+            prior_evidence=denied_prompt,
+        )
+        self.assertEqual(denied.state, "stopped")
+        self.assertEqual(denied.failure.category, "caption_approval_declined")
+        self.assertIsNotNone(denied.evidence.visual)
+        self.assertEqual(len(denied_runner.caption_fetches), 0)
+
+    def test_canceled_caption_network_action_stops_before_caption_or_visual_acquisition(self) -> None:
+        metadata = captioned_metadata(
+            subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt"}]},
+            duration=1.0,
+        )
+        runner = CaptionVisualRunner(
+            metadata,
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+        )
+        prompt = runtime.prepare(self.request(detail="transcript", cues=[0]))
+
+        canceled = runtime.prepare(
+            self.request(
+                detail="transcript",
+                cues=[0],
+                caption_network_approval={
+                    "receipt": prompt.caption_network_approval.receipt,
+                    "decision": "canceled",
+                },
+            ),
+            prior_evidence=prompt,
+        )
+
+        self.assertEqual(canceled.state, "canceled")
+        self.assertEqual(canceled.failure.category, "user_cancellation")
+        self.assertEqual(runner.caption_fetches, [])
+        self.assertFalse(any("--format" in arguments for _, arguments in runner.invocations))
+
+    def test_cross_origin_redirect_returns_a_new_caption_approval_without_following_it(self) -> None:
+        metadata = captioned_metadata(
+            subtitles={"en": [{"ext": "vtt", "url": "https://cdn.example/manual.vtt?token=first"}]},
+            duration=1.0,
+        )
+        runner = RedirectingCaptionRunner(
+            metadata,
+            {"manual:en": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n"},
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+        )
+        first = runtime.prepare(self.request())
+        second = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": first.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=first,
+        )
+        serialized_second = json.dumps(second.to_dict(), sort_keys=True)
+
+        self.assertEqual(second.state, "decision_required")
+        self.assertEqual(second.choice_kind, "caption_network")
+        self.assertEqual(second.caption_network_approval.hostname, "other-captions.example")
+        self.assertEqual(len(runner.caption_fetches), 1)
+        self.assertNotIn("redirect-secret", serialized_second)
+
+        completed = runtime.prepare(
+            self.request(
+                caption_network_approval={
+                    "receipt": second.caption_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=second,
+        )
+        self.assertEqual(completed.state, "ready")
+        self.assertEqual(len(runner.caption_fetches), 2)
 
     def test_multiple_usable_tracks_pause_with_sanitized_choices_before_download(self) -> None:
         runtime, runner = self.make_runtime(
@@ -311,9 +1057,69 @@ Hello &amp; welcome everyone
         serialized_outcome = json.dumps(outcome.to_dict(), sort_keys=True)
 
         self.assertEqual(runner.caption_fetches, [caption_url])
-        self.assertNotIn("cdn.example", serialized_outcome)
+        self.assertIn("cdn.example", serialized_outcome)
+        self.assertNotIn("private.vtt", serialized_outcome)
         self.assertNotIn("caption-secret", serialized_outcome)
         self.assertNotIn("cdn.example", outcome.report_markdown)
+
+        candidates = _caption_candidates_from_ytdlp(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": caption_url}]}
+            )
+        )
+        self.assertNotIn("private.vtt", repr(candidates))
+        self.assertNotIn("caption-secret", repr(candidates))
+        probe_snapshot = repr(
+            asdict(
+                _SourceProbe(
+                    MetadataEvidence(
+                        None, None, None, None, None, None, None, None, None, False
+                    ),
+                    candidates,
+                    (),
+                )
+            )
+        )
+        self.assertNotIn("private.vtt", probe_snapshot)
+        self.assertNotIn("caption-secret", probe_snapshot)
+
+        pending_runner = CaptionRunner(
+            captioned_metadata(
+                subtitles={"en": [{"ext": "vtt", "url": caption_url}]}
+            ),
+            {},
+        )
+        pending_runtime = WatchEvidenceRuntime(
+            command_runner=pending_runner,
+            caption_fetcher=pending_runner,
+            find_executable=fake_executable,
+        )
+        try:
+            pending = pending_runtime.prepare(self.request())
+            receipt = pending.caption_network_approval.receipt
+            selection = pending_runtime._caption_network_selections[receipt]
+            self.assertNotIn("private.vtt", repr(selection))
+            self.assertNotIn("caption-secret", repr(selection))
+        finally:
+            pending_runtime.close()
+
+    def test_yt_dlp_metadata_failure_never_renders_a_signed_caption_url(self) -> None:
+        caption_url = "https://caption-host.example/private.vtt?token=caption-secret"
+        runner = MetadataFailureRunner(f"upstream failure: {caption_url}")
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            caption_fetcher=runner,
+            find_executable=fake_executable,
+        )
+
+        outcome = runtime.prepare(self.request())
+        observable = json.dumps(outcome.to_dict(), sort_keys=True) + outcome.report_markdown
+
+        self.assertEqual(outcome.state, "failed")
+        self.assertEqual(outcome.failure.category, "metadata_probe")
+        self.assertNotIn("caption-host.example", observable)
+        self.assertNotIn("private.vtt", observable)
+        self.assertNotIn("caption-secret", observable)
 
     def test_ambiguous_same_format_caption_urls_are_not_silently_fetched(self) -> None:
         runtime, runner = self.make_runtime(
@@ -638,7 +1444,7 @@ Automatic caption text
 
         self.assertEqual(outcome.state, "partial")
         self.assertTrue(outcome.terminal)
-        self.assertIsNone(outcome.failure)
+        self.assertEqual(outcome.failure.category, "caption_parse")
         self.assertIsNone(outcome.evidence.transcript)
         self.assertEqual(outcome.coverage.transcript, "none")
         self.assertIn("could not be parsed", outcome.report_markdown)

@@ -29,6 +29,7 @@ This specification consolidates the closed children of [Wayfinder map #2](https:
 | Canonical packaging and installation ([#10](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/10)) | 11 | This specification |
 | Documentation, provenance, and security ([#9](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/9)) | 12 | This specification |
 | Verification and release gate ([#4](https://github.com/killer-block-coder-95/codex-watch-yt-video/issues/4)) | 13 | This specification |
+| Fail-closed native-caption networking and transcription release gates ([#44](https://github.com/prossima-ai/codex-watch-yt-video/issues/44)) | 4, 6, 8, 9, 12, 13 | This specification and hermetic implementation tests |
 
 Where the upstream inventory identified a Codex adaptation candidate, the later Wayfinder decisions in this document supersede the mechanism while retaining the observable outcome. In particular, the ordinary frame maximum is **768 px JPEG**, not the upstream 512 px default; a material detail may be re-extracted at **1024 px**.
 
@@ -39,7 +40,7 @@ Where the upstream inventory identified a Codex adaptation candidate, the later 
 - One public, unauthenticated `yt-dlp`-compatible HTTP(S) URL **or** one local video path per **watch request**.
 - An optional natural-language question; without one, a useful time-grounded summary.
 - Four **detail modes**: `transcript`, `efficient`, `balanced`, and `token-burner`.
-- Captions-first evidence acquisition, visual evidence preparation, and optional consent-gated audio transcription.
+- Captions-first evidence acquisition, including a separate, explicit approval-gated caption-network action for a selected native caption, and visual evidence preparation.
 - Stream-scoped timestamp citations, truthful partial-result reporting, same-task reuse, and validated run-owned cleanup.
 - A repository-owned Codex Desktop skill, with a manual personal installation route.
 
@@ -49,7 +50,8 @@ The v0.1 skill MUST NOT provide or imply support for:
 
 - Playlists, multiple videos in one request, automatic series processing, or a persistent media library.
 - Private, login-required, age-gated, region-bypassed, DRM-protected, live, or authenticated video; browser cookies, account sessions, credential extraction, or platform writes.
-- Full-video uploads to a transcription provider; only consented extracted audio is eligible for upload.
+- Full-video uploads to a transcription provider; a future separately enabled route may send only consented extracted audio.
+- Transcription or provider contact through a release-facing action surface. Transcription is release-disabled until the provider-specific gate in section 8 is satisfied and a human makes a separate decision.
 - Automatic package installation, update, self-installation, self-update, or configuration writes outside the approved target.
 - Global/cross-task evidence caches, background monitoring, automatic expiry cleanup, telemetry, analytics, or crash uploads.
 - Translation, diarization, OCR, object tracking, semantic scene understanding beyond the evidence Codex actually inspected, local sidecar subtitle discovery, or support guarantees for every site/container.
@@ -100,6 +102,8 @@ Use the following terminology consistently. The following distinctions are espec
 - An **evidence stream** is `metadata`, `transcript`, or `visual`. Streams may be synthesized but MUST NOT be silently conflated.
 - **Evidence coverage** is `complete`, `partial`, or `none`; **answerability** is `supported`, `uncertain`, or `unsupported`. They are independent values.
 - A **watch workspace** is a uniquely identified, runtime-owned temporary directory for exactly one request.
+- A **caption-network action** is the separate, explicit approval-gated retrieval of one selected native-caption resource. It is not a `yt-dlp` side effect, source-host approval, provider action, or transcription fallback.
+- A **caption-network approval receipt** is an opaque, single-use value issued only for one caption-network action. It is not a general receipt or a reusable URL capability.
 
 ## 4. Watch request, triggering, and validation
 
@@ -116,6 +120,7 @@ max_frames: positive integer     # optional override
 keep_duplicates: true | false    # default false
 output_dir: <explicit path>      # optional retained artifacts
 caption_track: <prior listed ID> # optional explicit selection
+caption_network_approval: {receipt, decision} # only from the preceding caption-network action
 audio_track: <prior listed ID>   # optional explicit selection
 ```
 
@@ -138,6 +143,7 @@ For zero, multiple, private/authenticated, playlist, live, or ambiguous sources,
 - `keep_duplicates: false` is the default. `true` disables ordinary-frame deduplication; it never removes a pinned cue.
 - `output_dir`, when supplied, is expanded/resolved and identifies intentionally retained artifacts. The runtime MUST obtain the host's narrow filesystem approval before creating or writing it when it falls outside writable roots; it MUST never delete that directory automatically.
 - `caption_track` and `audio_track` identify a sanitized, run-scoped ID emitted for that same choice kind in a prior `decision_required` response. An unknown ID, a stale ID, or an ID issued for a different choice kind is invalid. The runtime MUST reject it before any new acquisition, extraction, upload, or provider request and MUST NOT select a first/default track.
+- `caption_network_approval`, when present, contains exactly an opaque receipt from the immediately preceding caption-network `decision_required` outcome and one of `approved`, `declined`, or `canceled`. It MUST NOT accept a caption URL, path, query string, credential, token, hostname substitution, or any user-created receipt. A malformed, stale, replayed, tampered, mismatched, expired, or otherwise invalid receipt MUST fail closed before DNS or HTTP work.
 
 Caption and audio-track selection is deliberately conservative: an explicit valid track ID wins; when exactly one usable track exists, select it; otherwise return `decision_required` and ask the user to choose from sanitized available tracks. A user may request a language in natural language; it identifies a track only when it resolves to exactly one available native-caption track. The skill MUST NOT silently translate, infer language from title/uploader, or use an arbitrary first/default track.
 
@@ -154,7 +160,7 @@ The runtime produces immutable streams:
 | Stream | Examples | Citation rule |
 | --- | --- | --- |
 | `metadata` | source URL, duration, title, uploader, codec | Cite as metadata; never treat it as spoken or visible evidence. |
-| `transcript` | native/automatic captions or provider segments | Cite absolute source times and provenance. |
+| `transcript` | native/automatic captions; future provider segments only after the separate provider gate | Cite absolute source times and provenance. |
 | `visual` | inspected JPEG frames | Cite absolute source times, selection reason, and that the claim is visual. |
 
 User-facing answers MUST cite material claims with absolute, stream-scoped timestamps—for example, `The speaker says this at 00:31–00:34 (transcript); the board first visibly reads READY in the 00:36 frame (visual).` A visual claim MUST NOT be inferred from transcript wording; a speech claim MUST NOT be inferred from a silent frame. Conflicts and gaps MUST be stated.
@@ -212,7 +218,7 @@ The actual implementation language is open, but this boundary is not. The input 
 
 - `ready` — an immutable complete evidence bundle;
 - `partial` — an immutable bundle plus named stream/range gaps and warnings;
-- `decision_required` — a nonterminal pause that carries exactly one `choice_kind` (`caption_track`, `audio_track`, or `transcription`) and only sanitized, opaque, run-scoped choices with safe display metadata;
+- `decision_required` — a nonterminal pause that carries exactly one `choice_kind` (`caption_track`, `caption_network`, `audio_track`, or `transcription`) and only sanitized, opaque, run-scoped choices with safe display metadata. `caption_network` names the direct native-caption action, not a generic receipt model; its opaque approval receipt is the only action handle, rather than an independent decision handle;
 - `consent_required` — a nonterminal pause for fresh, provider-specific consent; no audio extraction/upload occurred;
 - `stopped` — a terminal, intentional stop with its reason and retained evidence/disposal state;
 - `failed` — a terminal failure with stage, category, retry state, retained evidence (if any), and safe disposal/reuse state; or
@@ -232,10 +238,10 @@ parse and validate
 → metadata
 → duration checks
 → create workspace
-→ captions
+→ caption inventory and track selection
+→ caption-network receipt decision
+→ bounded native-caption retrieval and parsing
 → visual evidence
-→ transcription consent
-→ transcription
 → immutable evidence bundle
 ```
 
@@ -249,7 +255,31 @@ Before the first source-host request, disclose that `yt-dlp` will contact the na
 
 For an eligible public URL, metadata and bounded subtitle availability are checked before media download. The downloader MUST inspect manual and automatic caption availability, exclude `live_chat`, and use a bounded request. It records every available track's sanitized run-scoped ID, language, type, and format. It selects a valid explicit `caption_track` ID, or the sole usable track; otherwise, when transcript evidence is needed, it returns `decision_required` before selecting/downloading a caption or producing transcript claims. It MAY continue a visual-only route that explicitly reports transcript coverage as `none`; that route MUST NOT make transcript claims without a valid selection and usable transcript evidence. The runtime MUST NOT default to English, translate, or infer a preference from metadata.
 
-The selected transcript records whether it was manual captions, automatic captions, OpenAI Whisper, Groq Whisper, or none. Normalize it into ordered segments with text, start/end times, language, and provenance; strip markup and collapse rolling duplicate/extended cues while retaining absolute source times. Do not automatically discover local sidecar subtitles.
+The selected transcript records whether it was manual captions, automatic captions, or none. Normalize it into ordered segments with text, start/end times, language, and provenance; strip markup and collapse rolling duplicate/extended cues while retaining absolute source times. Do not automatically discover local sidecar subtitles.
+
+#### Direct native-caption retrieval
+
+After a selected native caption exposes a retrieval resource, the runtime MUST return a separate, explicit approval-gated caption-network action before it resolves, connects to, or fetches that resource. Its user-visible approval prompt may disclose only the caption hostname, purpose, selected track, format, and byte cap, plus the opaque receipt needed to record an `approved`, `declined`, or `canceled` decision. It MUST NOT disclose a raw signed caption URL, path, query string, credential, token, or other sensitive URL material.
+
+The opaque, single-use approval receipt MUST bind the same Watch request, source, runtime session, workspace, selected caption track, supported format, byte cap, and exact normalized HTTPS origin (normalized hostname and port `443`). It expires after five minutes or request end, whichever comes first. Failure, cancellation, denial, or retry invalidates the receipt. Receipt verification MUST occur before any DNS or HTTP request; every rejected receipt makes zero outbound caption HTTP attempts. A receipt cannot be moved across actions, requests, sources, sessions, workspaces, tracks, formats, byte caps, or origins.
+
+Caption URLs supplied by `yt-dlp` are untrusted internal data. The runtime must not display, log, persist as evidence, or accept back as user input a raw signed caption URL or its query strings, credentials, tokens, or other sensitive material. Such material MUST NOT appear in a user-facing outcome, exception, diagnostic, snapshot, or log. A sanitized audit may retain only same-task/workspace facts needed to explain the action: hostname, purpose, selected track, format, byte cap, bounded byte count, redirect count, and typed status.
+
+Only public HTTPS is eligible. The URL policy MUST reject malformed URLs, non-HTTPS schemes, embedded credentials, IP literals, `localhost` and local aliases, nonstandard ports, loopback, private, link-local, multicast, unspecified, reserved, and other non-public targets. The resolver MUST require that all resolved IPv4 and IPv6 addresses are public, and the transport MUST connect only to those revalidated answers so hostname resolution cannot bypass the public-address rule.
+
+The direct native-caption transport MUST use the Python standard library's
+`urllib.request` HTTPS path, constructed from the sealed approved resource with
+no inherited proxy, redirect, cookie, or authentication handlers. It MUST force
+request-target debugging off, send only the fixed caption request headers, and
+dial the already-validated numeric DNS answers with TLS hostname verification.
+It MUST NOT use global `urlopen()` or an opener that can expose or redirect a
+signed caption URL outside this policy boundary.
+
+Redirect handling is fail closed. The runtime MUST enforce a strict redirect limit of three, detect a redirect loop, reject a malformed or missing `Location`, and reject every HTTPS-to-HTTP downgrade. The URL, hostname, resolution, and public-address rule are revalidated at every redirect hop. A redirect on the exact approved origin may continue within the limit; a new otherwise-public origin returns `decision_required` with a new receipt and no connection to that new origin. An unsafe redirect fails closed. Never forward sensitive authorization information to a redirect destination, and never expose a redirect URL outside the internal fetch boundary.
+
+The selected supported format MUST be enforced, and the byte cap is strict. An already-oversized `Content-Length` is rejected before body reads; actual streamed bytes are capped even when the declared length is absent, false, or misleading. The exact byte-cap boundary is accepted only when no further byte exists; the first byte beyond it is an oversized response. The fetcher MUST abort cleanly and MUST NOT return partial caption data as success.
+
+Direct native-caption retrieval is release-disabled until the contract above is implemented and covered by hermetic tests, and until a separately approved live public-caption validation run records adequate sanitized evidence. This specification and its tests do not grant that live authority, prove a live request, or make a release decision.
 
 Private, login-required, removed, region-limited, DRM-protected, or live media produces a plain unsupported-access outcome after one safe attempt. The runtime MUST NOT loop, use cookies, export a browser session, or try to bypass the access condition.
 
@@ -282,40 +312,27 @@ All focus and cue timestamps remain source-absolute. Transcript focus retains se
 
 Cue selection is a visual judgment prompted by genuinely deictic transcript language, not a blind keyword match. A rhetorical “look” MUST NOT cause a frame extraction. Focus drops out-of-range cues, reports their count, and never creates a phantom frame entry for an out-of-media request or extraction failure.
 
-## 8. Optional transcription, consent, secrets, and retries
+## 8. Transcription is release-disabled
 
-### 8.1 Provider selection and credentials
+### 8.1 Current release boundary
 
-v0.1 supports only:
+Transcription is release-disabled. No release-facing action surface may invoke provider credentials or provider clients, offer a `transcription` choice, extract audio for upload, or route a caption failure into a provider. Direct-caption success, denial, unavailability, parse failure, oversize response, HTTP failure, transport failure, unsafe destination, and redirect failure never invokes transcription, a provider credential, or a provider client.
 
-- OpenAI `whisper-1`, when timestamped segments are required; and
-- Groq `whisper-large-v3`.
+The repository may retain isolated adapter code and dated provider documentation for future work, but that is not an enabled provider, a live validation, or release authorization. There is no default provider and no silent cross-provider fallback. Credentials may come only from an external key manager or environment variables `OPENAI_API_KEY` and `GROQ_API_KEY`, read only by a future selected adapter at call time; the release-facing runtime MUST NOT read either value. The skill MUST NOT request secrets in chat, accept a secret value as a control, scan/read `.env`, persist a secret, print it, place it in arguments/filenames/URLs/reports, or probe one provider’s key after another fails. It MUST NOT revoke or delete a credential.
 
-There is no default provider, audio-upload consent is fresh for every watch request, and there is no silent cross-provider fallback. When captions are absent/unusable and transcription may help, the task MUST explicitly ask whether to continue. Its `choice_kind: transcription` choices MUST include a no-transcription route, and every affirmative choice MUST name exactly one listed provider and model. With one eligible provider, the prompt names that provider rather than treating credential availability as selection. With multiple eligible providers, it lists separate sanitized, run-scoped choices and requires the user to select one. The task and runtime MUST NOT infer a provider, use a default, or treat the presence of a credential as provider selection or consent. If none is available, return captions-only or frames-only evidence and setup guidance.
+### 8.2 Required future provider gate
 
-Credentials may come only from an external key manager or environment variables `OPENAI_API_KEY` and `GROQ_API_KEY`, read at call time. The skill MUST NOT request secrets in chat, accept a secret value as a control, scan/read `.env`, persist a secret, print it, place it in arguments/filenames/URLs/reports, or probe one provider’s key after another fails. It MUST NOT revoke or delete a credential.
+Before a human can consider enabling exactly one provider, that provider needs a conservative, provider-specific effective upload limit that is implemented and hermetically tested. It MUST account for the complete encoded request, including the media bytes, multipart/form-data boundaries, per-part headers, field names, metadata, and all other request-body overhead; it is not merely nominal media-file size. A generic file-size cap, a source-media size, or a nominal provider limit is not sufficient evidence for provider safety.
 
-### 8.2 Just-in-time consent
+Only after that gate is complete may a human select exactly one provider, review a separate provider-specific validation plan, and grant separate explicit human approval immediately before that provider activity. The plan must identify the selected provider/model, destination, current account/plan limit, complete request-size accounting, audio-only form, fresh provider-specific consent, separate provider-network approval, redaction/evidence handling, duration, and success criteria. Neither a direct-caption approval nor a human release decision authorizes a provider request.
 
-Native captions are always preferred. When captions are absent/unusable and transcription could help, the task first obtains the explicit transcription/provider decision required by section 8.1. Only after the user selects a named provider may the runtime continue to inventory audio tracks with `ffprobe`. It selects a valid explicit `audio_track` ID or the sole usable audio track. Multiple tracks without an explicit selection return `decision_required`; media with no audio proceeds without transcription. Only after both provider and track are selected does the runtime return `consent_required`, before extracting audio or making a provider request. The provider selection, fresh provider-specific consent, and separate host command-network approval are three distinct requirements; none implies either of the others.
+### 8.3 Future consent and upload requirements
 
-The consent prompt MUST name:
+If the separate provider gate and approval occur, native captions remain preferred. The task MUST explicitly offer a no-transcription route and require an explicit named-provider and audio-track choice; it MUST NOT infer a provider, use a default, or treat a credential as provider selection or consent. Only after both selections may it return `consent_required`, before audio extraction or a provider request. Provider selection, audio-track selection, fresh provider-specific audio-upload consent, and provider-network approval are distinct gates.
 
-- the selected provider and model;
-- the provider network destination and current privacy/retention link;
-- that **extracted audio only**, never the video, would be sent;
-- selected audio track, estimated duration and byte size, and potential chunking;
-- that separate host command-network approval is still required.
+The future consent prompt MUST name the selected provider and model, provider destination and current privacy/retention link, audio-only boundary, selected track, estimated duration, complete effective request-size limit, possible chunking, and the separate network approval. It must never promise that a nominal media-file limit is enough. A decline, cancellation, unavailable authorization, or missing gate stops before extraction/upload and returns only truthful captions/frames evidence where available.
 
-Declining, canceling, or lacking host network approval stops before audio extraction/upload and produces a truthful captions-only/frames-only result where possible. Consent is fresh and provider-specific for every request. A second provider needs a new selection, consent, and network approval. The selected track remains fixed through that request; a later track selection is a new preparation step and requires fresh consent.
-
-### 8.3 Upload form, chunking, and retries
-
-Audio fallback MUST NOT run for a source with no audio. For a consented source, extract one selected audio track to mono 16 kHz 64 kbps MP3; never upload video bytes or a video path. Measure the final artifact and split it into chronological contiguous chunks below a 24 MiB working ceiling and the current provider/account limit, retaining absolute offsets and coverage. Partial success MUST name missing intervals; it is never labeled a complete transcript.
-
-Each provider request is isolated to that provider’s credential. Retry only transient network errors, 429 responses honoring a bounded `Retry-After`, and 5xx responses. The policy is at most **three total attempts per chunk**, with jittered exponential delays; cap an honored wait at 60 seconds. Do not retry 401/403, invalid input, size/format failures, billing/quota exhaustion, or a denied approval. After retry exhaustion, preserve successful chunks as explicitly partial evidence or return no transcript, never hang or silently switch providers.
-
-Provider documentation, model availability, retention wording, and plan limits are release-time freshness checks, not permanent claims. If the release cannot verify the required current disclosure, it MUST disable transcription rather than assume old research remains valid.
+For an approved future provider, extract only one selected audio track; never upload video bytes or a video path. Every request remains isolated to that provider's credential. Retry only a selected provider's explicitly transient failures under the then-approved bounded policy; never retry a denied approval or silently switch providers. Provider documentation, model availability, retention wording, account entitlement, and plan limits are release-time freshness checks, not permanent claims. If any required current disclosure, effective limit, test, or approval is absent, transcription remains release-disabled.
 
 ## 9. Failures, cancellation, and truthful outcomes
 
@@ -324,12 +341,12 @@ Every runtime outcome MUST expose its state and whether it is terminal. Terminal
 - invalid request or unsupported source;
 - missing preflight dependency;
 - denied or unavailable sandbox/network/write authority;
-- source acquisition/caption/media failure;
+- source acquisition/caption/media failure, including typed native-caption approval, redirect, URL-policy, byte-limit, HTTP, transport, unavailability, and parse outcomes;
 - consent declined/canceled;
 - provider permanent/transient/partial failure; and
 - user cancellation.
 
-For a URL, a playable media output may be usable even if subtitle acquisition exits non-zero; no usable media is a hard acquisition failure with safe diagnostic context. Caption parse failure is non-fatal and MUST be disclosed before the allowed fallback. Dependency/media probe/extraction failures name the operation and leave a safely identifiable workspace state.
+For a URL, a playable media output may be usable even if subtitle acquisition exits non-zero; no usable media is a hard acquisition failure with safe diagnostic context. The direct-caption outcomes are distinct: a valid parsed result is `ready`; a declined caption-network approval is terminal `stopped`; cancellation is `canceled`; unavailable, parse, oversize, HTTP, transport, URL-policy, and redirect failures are truthful `partial` or typed terminal safety outcomes with transcript coverage `none`. A direct-caption failure MUST NOT invoke transcription or disguise a partial caption file as success. Dependency/media probe/extraction failures name the operation and leave a safely identifiable workspace state.
 
 No cancellation returns unsolicited prose. No failure creates a fake transcript, selected frame, credential diagnosis, or completed cleanup result. Current source and same-task evidence state remain honest after all outcomes.
 
@@ -386,7 +403,7 @@ Every material public or user-facing claim MUST be classified as one of:
 - `implementation requirement` — specified but not live-verified; or
 - `unsupported/out of scope`.
 
-The documents MUST state that local captions/visual processing are preferred; transcription sends only consented extracted audio; host network approval is separate; no telemetry/analytics/crash upload occurs; and private/authenticated/DRM media are unsupported. Recheck provider privacy/retention links and wording before every release. Missing verified disclosure disables the corresponding provider.
+The documents MUST state that local captions/visual processing are preferred; direct native-caption retrieval is a separate explicit receipt-gated action; raw signed caption URLs and sensitive URL material are redacted; host network approval is separate; no telemetry/analytics/crash upload occurs; and private/authenticated/DRM media are unsupported. They MUST state that direct captions and transcription are release-disabled until their distinct gates close. Transcription sends no data in the current release surface; any future provider path may send only consented extracted audio after the complete effective request-size gate, selected-provider validation plan, and separate explicit human approval. Recheck provider privacy/retention links and wording before every release. Missing verified disclosure disables the corresponding provider.
 
 The provenance record MUST identify the source commit, spec revision, parity snapshot, host/tool versions, evidence runs, deviations, approval issue, licenses/notices, and the clean-room review. It MUST say neither the upstream project nor providers endorse this project.
 
@@ -409,18 +426,18 @@ Static analysis, documentation review, mocks, and synthetic tests may pass only 
 
 | Group | Rows | Required proof |
 | --- | --- | --- |
-| Hermetic behavior and safety | **H-01** input/trigger refusal; **H-02** injection-safe adapter argument arrays; **H-03** missing-tool typed guidance; **H-04** controls/mode caps; **H-05** focus/cue/track-selection validation; **H-06** stream separation/citations; **H-07** typed outcome/retry/cancellation; **H-08** same-task reuse; **H-09** provider consent, selected-track disclosure, and credential isolation; **H-10** hostile-workspace cleanup refusal/success. | Independently authored offline fixtures and mocks prove observable behavior; no upstream test code. |
+| Hermetic behavior and safety | **H-01** input/trigger refusal; **H-02** injection-safe adapter argument arrays; **H-03** missing-tool typed guidance; **H-04** controls/mode caps; **H-05** focus/cue/track-selection validation; **H-06** stream separation/citations; **H-07** typed outcome/retry/cancellation; **H-08** same-task reuse; **H-09** direct-caption opaque-receipt binding, expiry, invalidation, redaction, public-address policy, redirects, byte caps, and no-provider fallback; **H-10** hostile-workspace cleanup refusal/success; **H-11** release-facing transcription disablement and the future complete-request-size gate. | Independently authored offline fixtures and mocks prove observable behavior; no upstream test code. They do not prove a source-host request, DNS result, redirect, provider request, or host approval. |
 | Synthetic visual grounding | **S-01** generated ground-truth media including multi-track metadata; **S-02** 768/1024 extraction and escalation; **S-03** 0/50/100/251 scale/mode behavior; **S-04** independent review of visible claims. | Cut-heavy, static, held-slide-small-change, portrait, silent, multi-track, and long metadata fixtures; evidence reviewer has no generator/expected-answer access. |
 | Desktop/package/authority | **D-01** canonical repository package discovery; **D-02** personal symlink discovery; **D-03** duplicate-path, explicit/implicit/negative trigger, and fresh-task reload behavior; **D-04** offline, denied network, denied outside-workspace write, and local-frame fallback. | Actual target macOS Desktop tasks. A fresh task proves discovery/reload; it does not prove in-task refresh. |
-| Live public media | **L-01** one stable public captioned-video release card. | With just-in-time network approval: prove captions-first preparation, transcript detail without video download when eligible, provenance, a focused visual rerun, and safe retained evidence. |
-| Live provider | **L-02** one short selected-provider Whisper smoke. | With disposable/restricted credential, fresh provider consent, and host network approval: prove audio-only upload, provider isolation, timestamps/coverage, and redacted evidence. |
+| Live public caption | **L-01** one separately human-approved public-caption validation run. | Prove the exact committed direct-caption action against the approved public source, sanitized hostname/redirect validation, bounded byte count, typed outcome, no transcription/provider path, and retained redacted evidence. A cross-host caption URL is preferred when lawfully knowable, but the approval applies only to the named one run. |
+| Future live provider | **L-02** one separately approved selected-provider validation. | This row is unavailable while transcription is release-disabled. Before it may run, a human selects one provider; its complete effective request-size limit, including multipart/form-data and all request-body overhead, is implemented and tested; and the human approves a provider-specific plan immediately before the activity. |
 | Documents and provenance | **P-01** scope/privacy/setup/license claims; **P-02** provenance and clean-room review. | Review each required companion document, notices, release provenance, and independent-source declaration. |
 
 ### 13.3 Release decision
 
-The implementation is release-ready only when every H, S, D, P, and L-01 row passes, plus L-02 for one intentionally selected provider. An unavailable authorization/source/provider is `BLOCKED`, never waived or converted into a pass. The unselected provider may remain `UNVERIFIED`; it MUST NOT be marketed as verified.
+Direct-caption retrieval is not release-ready until every applicable H, S, D, P, and L-01 row passes and a human explicitly records a release decision for the specifically defined scope. L-01 requires separate live-run approval; this specification, a code commit, hermetic tests, or a release decision do not supply it. Transcription is excluded from every release scope while it is release-disabled; it cannot become in-scope until the separate L-02 gate closes. An unavailable authorization, source, provider, or evidence record is `BLOCKED`, never waived or converted into a pass. The unselected provider must not be marketed as verified.
 
-The release record MUST name intentional deviations from the parity snapshot (including 768 px ordinary JPEG frames and eight-frame chronology batches) and their calibration evidence. Live behavior, current provider terms, extractor compatibility, account entitlement, and Desktop discovery must be recorded as live evidence, not inferred from static checks.
+The release record MUST name intentional deviations from the parity snapshot (including 768 px ordinary JPEG frames and eight-frame chronology batches) and their calibration evidence. It MUST record the pinned base and implementation commits, exact validation commands/results, Standards and Spec reviews and each resolution, transcription-disablement evidence, live public-caption evidence if separately approved, provider-validation status, remaining blockers, and the human release decision. Live behavior, current provider terms, extractor compatibility, account entitlement, and Desktop discovery must be recorded as live evidence, not inferred from static checks. A human release decision does not authorize publishing, deployment, provider enablement, or another live action.
 
 ## 14. Implementation-ready checklist and satisfied approval gate
 

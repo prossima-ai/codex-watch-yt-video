@@ -19,10 +19,23 @@ import tempfile
 import time
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TextIO, TypeGuard
 from urllib.parse import urlsplit
-from urllib import error as urlerror
-from urllib import request as urlrequest
 import xml.etree.ElementTree as ET
 
+from watch_caption_network import (
+    BoundedCaptionFetcher,
+    CaptionApprovalDecision,
+    CaptionApprovalReceiptError,
+    CaptionApprovalRegistry,
+    CaptionFetchResult,
+    CaptionNetworkApproval,
+    CaptionNetworkBinding,
+    CaptionNetworkError,
+    CaptionRedirectApprovalRequired,
+    CaptionResource,
+    CaptionResponseTooLarge,
+    CaptionUnavailable,
+    caption_resource,
+)
 from watch_transcription import (
     AudioChunkUpload,
     MissingProviderCredentialError,
@@ -54,8 +67,9 @@ EvidenceStage = Literal[
     "audio_inventory",
     "audio_extraction",
     "provider",
+    "caption_network",
 ]
-ChoiceKind = Literal["caption_track", "audio_track", "transcription"]
+ChoiceKind = Literal["caption_track", "caption_network", "audio_track", "transcription"]
 CaptionType = Literal["manual", "automatic"]
 TranscriptProvenance = Literal[
     "manual_captions",
@@ -97,6 +111,16 @@ FailureCategory = Literal[
     "provider_transient",
     "provider_permanent",
     "provider_partial",
+    "caption_approval_invalid",
+    "caption_approval_expired",
+    "caption_approval_declined",
+    "caption_unavailable",
+    "caption_response_too_large",
+    "caption_parse",
+    "caption_http",
+    "caption_transport",
+    "caption_url_policy",
+    "caption_redirect",
 ]
 DisposalState = Literal[
     "not_created",
@@ -187,6 +211,7 @@ class WatchControls:
     keep_duplicates: bool
     output_dir: str | None
     caption_track: str | None
+    caption_network_approval: CaptionApprovalDecision | None
     transcription_choice: str | None
     audio_track: str | None
     audio_upload_consent: ConsentDecision | None
@@ -263,6 +288,37 @@ class CaptionInventoryItem:
     caption_type: CaptionType
     format: str
     usable: bool
+
+
+CaptionNetworkStatus = Literal[
+    "approval_required",
+    "approved",
+    "denied",
+    "canceled",
+    "succeeded",
+    "unavailable",
+    "response_too_large",
+    "parse_failed",
+    "http_failed",
+    "transport_failed",
+    "url_policy_failed",
+    "redirect_failed",
+    "failed",
+]
+
+
+@dataclass(frozen=True)
+class CaptionNetworkAudit:
+    """Only the approved, sanitized caption-network facts retained in memory."""
+
+    status: CaptionNetworkStatus
+    hostname: str
+    purpose: Literal["retrieve_selected_native_caption"]
+    selected_track_id: str
+    selected_format: str
+    byte_cap: int
+    bytes_read: int | None = None
+    redirect_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -367,6 +423,8 @@ class EvidenceOutcome:
     choices: tuple[CaptionChoice | TranscriptionChoice | AudioTrackChoice, ...] = ()
     caption_inventory: tuple[CaptionInventoryItem, ...] = ()
     decision_handle: str | None = None
+    caption_network_approval: CaptionNetworkApproval | None = None
+    caption_network_audit: CaptionNetworkAudit | None = None
     consent: ConsentRequest | None = None
     consent_handle: str | None = None
     workspace_id: str | None = None
@@ -440,7 +498,16 @@ class _CaptionCandidate:
     caption_type: CaptionType
     format: str
     usable: bool
-    caption_url: str | None
+    resource: CaptionResource | None
+    unsafe_route: bool = False
+
+
+@dataclass
+class _CaptionEndpointAvailability:
+    """Untrusted extractor endpoints reduced to safe routing facts only."""
+
+    safe_resources: set[CaptionResource] = field(default_factory=set)
+    unsafe_route_seen: bool = False
 
 
 @dataclass(frozen=True)
@@ -468,6 +535,25 @@ class _CaptionSelection:
     issued_choices: tuple[CaptionChoice, ...]
     metadata_probe: _SourceProbe
     workspace_id: str
+
+
+@dataclass(frozen=True)
+class _CaptionNetworkSelection:
+    source_value: str
+    watch_request_id: str
+    workspace_id: str
+    selected_caption: CaptionChoice
+    resource: CaptionResource
+    binding: CaptionNetworkBinding
+    approval: CaptionNetworkApproval
+    metadata_probe: _SourceProbe
+    warnings: tuple[str, ...]
+    tools: tuple[ToolStatus, ...]
+    javascript_support: JavaScriptSupport
+    controls: WatchControls
+    caption_inventory: tuple[CaptionInventoryItem, ...]
+    executable_paths: tuple[tuple[str, str | None], ...]
+    question: object
 
 
 @dataclass(frozen=True)
@@ -575,7 +661,9 @@ class CommandRunner(Protocol):
 
 
 class CaptionFetcher(Protocol):
-    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None: ...
+    def fetch(
+        self, resource: CaptionResource, output_fd: int, *, max_bytes: int
+    ) -> CaptionFetchResult | None: ...
 
 
 @dataclass(frozen=True)
@@ -686,44 +774,15 @@ class SubprocessCommandRunner:
 
 
 class UrlCaptionFetcher:
-    """Fetch a selected public caption directly into a caller-owned descriptor."""
+    """Production direct-caption fetcher with pinned DNS and bounded redirects."""
 
-    def fetch(self, url: str, output_fd: int, *, max_bytes: int) -> None:
-        _validate_caption_resource_url(url)
-        opener = urlrequest.build_opener(
-            urlrequest.ProxyHandler({}), _CaptionRedirectHandler()
-        )
-        request = urlrequest.Request(url, headers={"User-Agent": "codex-watch/1"})
-        try:
-            with opener.open(request, timeout=15) as response:
-                _validate_caption_resource_url(response.geturl())
-                total_bytes = 0
-                while True:
-                    chunk = response.read(min(64 * 1024, max_bytes + 1 - total_bytes))
-                    if not chunk:
-                        return
-                    total_bytes += len(chunk)
-                    if total_bytes > max_bytes:
-                        raise OSError("The selected native caption exceeds the safe parsing limit.")
-                    _write_all_bytes(output_fd, chunk)
-        except (urlerror.URLError, TimeoutError) as error:
-            raise OSError("The selected native caption could not be fetched.") from error
+    def __init__(self) -> None:
+        self._fetcher = BoundedCaptionFetcher()
 
-
-class _CaptionRedirectHandler(urlrequest.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        request: urlrequest.Request,
-        file_pointer: object,
-        code: int,
-        message: str,
-        headers: object,
-        new_url: str,
-    ) -> urlrequest.Request | None:
-        _validate_caption_resource_url(new_url)
-        return super().redirect_request(
-            request, file_pointer, code, message, headers, new_url
-        )
+    def fetch(
+        self, resource: CaptionResource, output_fd: int, *, max_bytes: int
+    ) -> CaptionFetchResult:
+        return self._fetcher.fetch(resource, output_fd, max_bytes=max_bytes)
 
 
 class WatchEvidenceRuntime:
@@ -740,6 +799,7 @@ class WatchEvidenceRuntime:
         retry_sleeper: Callable[[float], None] = time.sleep,
         retry_jitter: Callable[[float], float] | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._command_runner = command_runner or SubprocessCommandRunner()
         self._caption_fetcher = caption_fetcher or UrlCaptionFetcher()
@@ -753,6 +813,9 @@ class WatchEvidenceRuntime:
         self._retry_jitter = retry_jitter or _default_retry_jitter
         self._cancellation_requested = cancellation_requested or (lambda: False)
         self._caption_selections: dict[str, _CaptionSelection] = {}
+        self._caption_receipts = CaptionApprovalRegistry(clock=clock)
+        self._caption_network_selections: dict[str, _CaptionNetworkSelection] = {}
+        self._caption_session_id = f"caption_session_{secrets.token_urlsafe(18)}"
         self._transcription_selections: dict[str, _TranscriptionSelection] = {}
         self._audio_selections: dict[str, _AudioSelection] = {}
         self._consent_selections: dict[str, _ConsentSelection] = {}
@@ -771,6 +834,8 @@ class WatchEvidenceRuntime:
     def close(self) -> None:
         """Release this runtime's workspace locks without deleting any workspace."""
 
+        self._caption_receipts.invalidate_all()
+        self._caption_network_selections.clear()
         for record in self._workspaces.values():
             lock_file = record.lock_file
             if not lock_file.closed:
@@ -795,6 +860,13 @@ class WatchEvidenceRuntime:
             except OSError:
                 pass
             self._workspace_root_fd = None
+
+    def _invalidate_caption_network_receipt(self, receipt: object) -> None:
+        """Burn a known receipt after every rejected caption-action attempt."""
+
+        self._caption_receipts.invalidate_receipt(receipt)
+        if isinstance(receipt, str):
+            self._caption_network_selections.pop(receipt, None)
 
     def __del__(self) -> None:
         try:
@@ -2085,6 +2157,17 @@ class WatchEvidenceRuntime:
     def _revoke_workspace(self, record: _WorkspaceRecord, state: CleanupState) -> None:
         record.reuse_eligible = False
         record.cleanup_state = state
+        # A revoked workspace ends every pending direct-caption action bound
+        # to it.  Do not leave a valid-looking receipt resident until somebody
+        # attempts a later resume.
+        self._caption_receipts.invalidate_workspace(record.workspace_id)
+        stale_receipts = tuple(
+            receipt
+            for receipt, selection in self._caption_network_selections.items()
+            if selection.workspace_id == record.workspace_id
+        )
+        for receipt in stale_receipts:
+            self._caption_network_selections.pop(receipt, None)
         if record.evidence_handle is not None:
             self._evidence_handles.pop(record.evidence_handle, None)
             self._retired_evidence_handles[record.evidence_handle] = record
@@ -2218,8 +2301,10 @@ class WatchEvidenceRuntime:
             return self.invalid_input(
                 "invalid_request", "The watch request must be one JSON object."
             )
+        attempted_caption_receipt = _caption_network_receipt_from_request(watch_request)
         source, validation_failure = self._validate_source(watch_request)
         if validation_failure is not None:
+            self._invalidate_caption_network_receipt(attempted_caption_receipt)
             return self._failure_outcome(
                 state="stopped",
                 source=source,
@@ -2229,6 +2314,7 @@ class WatchEvidenceRuntime:
 
         controls, validation_failure = self._validate_controls(watch_request)
         if validation_failure is not None:
+            self._invalidate_caption_network_receipt(attempted_caption_receipt)
             return self._failure_outcome(
                 state="stopped", source=source, failure=validation_failure
             )
@@ -2244,6 +2330,8 @@ class WatchEvidenceRuntime:
         )
         if not same_current_source:
             self._current_workspace_id = None
+            self._caption_receipts.invalidate_all()
+            self._caption_network_selections.clear()
 
         if controls.transcription_choice is not None:
             transcription_selection, selection_failure = self._selected_transcription(
@@ -2545,6 +2633,13 @@ class WatchEvidenceRuntime:
                 workspace=workspace,
             )
 
+        if controls.caption_network_approval is not None:
+            return self._resume_caption_network_action(
+                source=source,
+                controls=controls,
+                prior_evidence=prior_evidence,
+            )
+
         if controls.caption_track is None:
             has_handle, _ = _evidence_handle_from_prior(prior_evidence)
             current_record = (
@@ -2773,6 +2868,8 @@ class WatchEvidenceRuntime:
                 tools=tools,
                 javascript_support=javascript_support,
                 workspace=workspace,
+                executable_paths=executable_paths,
+                question=watch_request.get("question"),
             )
             outcome = self._with_visual_evidence(
                 caption_outcome,
@@ -2783,9 +2880,18 @@ class WatchEvidenceRuntime:
                 question=watch_request.get("question"),
                 workspace=workspace,
             )
-            outcome = self._offer_transcription(
-                source, outcome, workspace, metadata_result, executable_paths
-            )
+            # An injected non-release adapter seam may exercise future provider
+            # behavior only when metadata exposed no caption route at all.  A
+            # selected native-caption route (including every denial, redirect,
+            # unavailability, parse, size, or transport outcome) is terminal
+            # within the caption path and never escalates into transcription.
+            if (
+                not caption_outcome.caption_inventory
+                and caption_outcome.caption_network_audit is None
+            ):
+                outcome = self._offer_transcription(
+                    source, outcome, workspace, metadata_result, executable_paths
+                )
             return self._attach_workspace_outcome(workspace, outcome, store=True)
 
         if self._visual_enabled:
@@ -4131,6 +4237,7 @@ class WatchEvidenceRuntime:
             "keep_duplicates",
             "output_dir",
             "caption_track",
+            "caption_network_approval",
             "transcription_choice",
             "audio_track",
             "audio_upload_consent",
@@ -4210,6 +4317,28 @@ class WatchEvidenceRuntime:
                 "invalid_selection",
                 "caption_track must be one non-empty run-scoped choice ID.",
             )
+        raw_caption_approval = watch_request.get("caption_network_approval")
+        caption_network_approval: CaptionApprovalDecision | None = None
+        if raw_caption_approval is not None:
+            if not isinstance(raw_caption_approval, Mapping) or set(
+                raw_caption_approval
+            ) != {"receipt", "decision"}:
+                return None, _validation_failure(
+                    "caption_approval_invalid",
+                    "caption_network_approval must contain exactly receipt and decision.",
+                )
+            receipt = raw_caption_approval.get("receipt")
+            decision = raw_caption_approval.get("decision")
+            if (
+                not isinstance(receipt, str)
+                or not receipt.strip()
+                or not isinstance(decision, str)
+            ):
+                return None, _validation_failure(
+                    "caption_approval_invalid",
+                    "caption_network_approval is not a valid fresh native-caption receipt decision.",
+                )
+            caption_network_approval = CaptionApprovalDecision(receipt, decision)
         transcription_choice = watch_request.get("transcription_choice")
         if transcription_choice is not None and (
             not isinstance(transcription_choice, str) or not transcription_choice.strip()
@@ -4265,6 +4394,7 @@ class WatchEvidenceRuntime:
             value is not None
             for value in (
                 caption_track,
+                caption_network_approval,
                 transcription_choice,
                 audio_track,
                 audio_upload_consent,
@@ -4286,6 +4416,7 @@ class WatchEvidenceRuntime:
                 keep_duplicates=keep_duplicates,
                 output_dir=output_dir,
                 caption_track=caption_track,
+                caption_network_approval=caption_network_approval,
                 transcription_choice=transcription_choice,
                 audio_track=audio_track,
                 audio_upload_consent=audio_upload_consent,
@@ -4443,13 +4574,16 @@ class WatchEvidenceRuntime:
                     message=(
                         "The source appears private, authenticated, unavailable, "
                         "region-limited, age-gated, DRM-protected, or live. No bypass "
-                        "will be attempted. Diagnostic: "
-                        f"{_escape_control_sequences(diagnostic.strip())}"
+                        "will be attempted."
                     ),
                     attempts=1,
                     disposition=CURRENT_SOURCE_NO_WORKSPACE,
                 )
-            return _metadata_failure("yt-dlp", diagnostic)
+            # yt-dlp diagnostic output is untrusted.  In particular, failures can
+            # include the signed native-caption URLs it discovered before failing.
+            # Keep the public/domain failure stable rather than rendering that
+            # output into a report, exception snapshot, or audit record.
+            return _metadata_failure("yt-dlp", "")
         try:
             payload = json.loads(result.stdout)
         except (json.JSONDecodeError, TypeError):
@@ -4495,6 +4629,8 @@ class WatchEvidenceRuntime:
         tools: tuple[ToolStatus, ...],
         javascript_support: JavaScriptSupport,
         workspace: _WorkspaceRecord,
+        executable_paths: Mapping[str, str | None],
+        question: object,
     ) -> EvidenceOutcome:
         caption_inventory = self._caption_inventory(
             source, metadata_probe.caption_candidates, selected_caption
@@ -4505,6 +4641,20 @@ class WatchEvidenceRuntime:
             if item.usable
         )
         if not caption_choices:
+            if any(candidate.unsafe_route for candidate in metadata_probe.caption_candidates):
+                return self._caption_route_policy_outcome(
+                    source=source,
+                    controls=controls,
+                    metadata=metadata_probe.metadata,
+                    warnings=warnings,
+                    tools=tools,
+                    javascript_support=javascript_support,
+                    caption_inventory=caption_inventory,
+                    message=(
+                        "A native-caption retrieval route failed the public HTTPS policy; "
+                        "transcript evidence is unavailable."
+                    ),
+                )
             missing_caption_warnings = warnings + (
                 "No usable native caption tracks are available.",
             )
@@ -4617,14 +4767,432 @@ class WatchEvidenceRuntime:
             ),
             None,
         )
-        if selected_candidate is None or selected_candidate.caption_url is None:
-            raw_segments, caption_warnings = None, (
-                "The selected native caption no longer has a verified retrieval route; transcript evidence is unavailable.",
+        if selected_candidate is None or selected_candidate.resource is None:
+            if selected_candidate is not None and selected_candidate.unsafe_route:
+                return self._caption_route_policy_outcome(
+                    source=source,
+                    controls=controls,
+                    metadata=metadata_probe.metadata,
+                    warnings=warnings,
+                    tools=tools,
+                    javascript_support=javascript_support,
+                    caption_inventory=caption_inventory,
+                    message=(
+                        "The selected native-caption retrieval route failed the public "
+                        "HTTPS policy; transcript evidence is unavailable."
+                    ),
+                )
+            return self._completed_outcome(
+                state="partial",
+                source=source,
+                controls=controls,
+                metadata=metadata_probe.metadata,
+                coverage=EvidenceCoverage("complete", "none", "none", "partial"),
+                warnings=warnings
+                + (
+                    "The selected native caption no longer has a verified retrieval route; transcript evidence is unavailable.",
+                ),
+                tools=tools,
+                javascript_support=javascript_support,
+                caption_inventory=caption_inventory,
             )
-        else:
-            raw_segments, caption_warnings = self._download_caption(
-                selected_caption, selected_candidate.caption_url, workspace
+        return self._caption_network_approval_required(
+            source=source,
+            controls=controls,
+            metadata_probe=metadata_probe,
+            selected_caption=selected_caption,
+            resource=selected_candidate.resource,
+            warnings=warnings,
+            tools=tools,
+            javascript_support=javascript_support,
+            workspace=workspace,
+            caption_inventory=caption_inventory,
+            executable_paths=executable_paths,
+            question=question,
+        )
+
+    def _caption_route_policy_outcome(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        metadata: MetadataEvidence,
+        warnings: tuple[str, ...],
+        tools: tuple[ToolStatus, ...],
+        javascript_support: JavaScriptSupport,
+        caption_inventory: tuple[CaptionInventoryItem, ...],
+        message: str,
+    ) -> EvidenceOutcome:
+        return self._completed_outcome(
+            state="partial",
+            source=source,
+            controls=controls,
+            metadata=metadata,
+            coverage=EvidenceCoverage("complete", "none", "none", "partial"),
+            warnings=warnings,
+            tools=tools,
+            javascript_support=javascript_support,
+            caption_inventory=caption_inventory,
+            failure=Failure(
+                stage="caption_network",
+                category="caption_url_policy",
+                message=message,
+                attempts=0,
+                disposition=EvidenceDisposition(True, "retained", "same_task_evidence"),
+            ),
+        )
+
+    def _caption_network_approval_required(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        metadata_probe: _SourceProbe,
+        selected_caption: CaptionChoice,
+        resource: CaptionResource,
+        warnings: tuple[str, ...],
+        tools: tuple[ToolStatus, ...],
+        javascript_support: JavaScriptSupport,
+        workspace: _WorkspaceRecord,
+        caption_inventory: tuple[CaptionInventoryItem, ...],
+        executable_paths: Mapping[str, str | None],
+        question: object,
+        watch_request_id: str | None = None,
+    ) -> EvidenceOutcome:
+        self._caption_receipts.invalidate_workspace(workspace.workspace_id)
+        stale_receipts = tuple(
+            receipt
+            for receipt, selection in self._caption_network_selections.items()
+            if selection.workspace_id == workspace.workspace_id
+        )
+        for receipt in stale_receipts:
+            self._caption_network_selections.pop(receipt, None)
+        request_id = watch_request_id or _new_caption_request_id()
+        binding = CaptionNetworkBinding(
+            action="native_caption_retrieval",
+            watch_request_id=request_id,
+            source_value=source.value,
+            session_id=self._caption_session_id,
+            workspace_id=workspace.workspace_id,
+            selected_track_id=selected_caption.id,
+            selected_format=selected_caption.format,
+            byte_cap=MAX_CAPTION_BYTES,
+            origin=resource.origin,
+        )
+        approval = self._caption_receipts.issue(binding)
+        self._caption_network_selections[approval.receipt] = _CaptionNetworkSelection(
+            source_value=source.value,
+            watch_request_id=request_id,
+            workspace_id=workspace.workspace_id,
+            selected_caption=selected_caption,
+            resource=resource,
+            binding=binding,
+            approval=approval,
+            metadata_probe=metadata_probe,
+            warnings=warnings,
+            tools=tools,
+            javascript_support=javascript_support,
+            controls=controls,
+            caption_inventory=caption_inventory,
+            executable_paths=tuple(executable_paths.items()),
+            question=question,
+        )
+        coverage = EvidenceCoverage("complete", "none", "none", "partial")
+        audit = CaptionNetworkAudit(
+            status="approval_required",
+            hostname=approval.hostname,
+            purpose=approval.purpose,
+            selected_track_id=approval.selected_track_id,
+            selected_format=approval.selected_format,
+            byte_cap=approval.byte_cap,
+        )
+        report = _render_report(
+            state="decision_required",
+            source=source,
+            metadata=metadata_probe.metadata,
+            coverage=coverage,
+            answerability="uncertain",
+            warnings=warnings,
+            tools=tools,
+            javascript_support=javascript_support,
+            controls=controls,
+            choice_kind="caption_network",
+            caption_network_approval=approval,
+        )
+        return EvidenceOutcome(
+            state="decision_required",
+            terminal=False,
+            source=source,
+            coverage=coverage,
+            answerability="uncertain",
+            warnings=warnings,
+            failure=None,
+            evidence=EvidenceBundle(metadata=metadata_probe.metadata),
+            tools=tools,
+            javascript_support=javascript_support,
+            controls=controls,
+            report_markdown=report,
+            choice_kind="caption_network",
+            caption_inventory=caption_inventory,
+            caption_network_approval=approval,
+            caption_network_audit=audit,
+        )
+
+    def _resume_caption_network_action(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        prior_evidence: object | None,
+    ) -> EvidenceOutcome:
+        decision = controls.caption_network_approval
+        assert decision is not None
+        selection = self._caption_network_selections.get(decision.receipt)
+        if (
+            selection is None
+            or selection.source_value != source.value
+            or prior_evidence is None
+            or not _prior_evidence_matches_caption_network(
+                prior_evidence, source, selection
             )
+        ):
+            self._invalidate_caption_network_receipt(decision.receipt)
+            return self._caption_network_failure(
+                source=source,
+                controls=controls,
+                category="caption_approval_invalid",
+                message="The native-caption approval receipt is unknown, stale, altered, cross-session, or does not match the same-task approval prompt.",
+            )
+        workspace = self._workspaces.get(selection.workspace_id)
+        if (
+            workspace is None
+            or not workspace.reuse_eligible
+            or self._workspace_validation_error(workspace) is not None
+        ):
+            if workspace is not None:
+                self._revoke_workspace(workspace, "cleanup_refused")
+            self._invalidate_caption_network_receipt(decision.receipt)
+            return self._caption_network_failure(
+                source=source,
+                controls=controls,
+                category="caption_approval_invalid",
+                message="The native-caption approval workspace is no longer eligible; no caption HTTP request was made.",
+                workspace=workspace,
+            )
+        try:
+            verified = self._caption_receipts.verify_and_consume(
+                decision, selection.binding
+            )
+        except CaptionApprovalReceiptError as error:
+            self._invalidate_caption_network_receipt(decision.receipt)
+            category: FailureCategory = (
+                "caption_approval_expired"
+                if error.code == "expired_receipt"
+                else "caption_approval_invalid"
+            )
+            return self._caption_network_failure(
+                source=source,
+                controls=controls,
+                category=category,
+                message=str(error),
+                workspace=workspace,
+                audit=self._caption_network_audit(selection, "failed"),
+            )
+        self._caption_network_selections.pop(decision.receipt, None)
+        if verified.decision == "declined":
+            outcome = self._with_caption_network_visual(
+                self._caption_network_terminal_outcome(
+                    state="stopped",
+                    source=source,
+                    selection=selection,
+                    category="caption_approval_declined",
+                    message="Native-caption network approval was declined; no caption HTTP request was made.",
+                    audit=self._caption_network_audit(selection, "denied"),
+                ),
+                selection=selection,
+                workspace=workspace,
+            )
+            return self._attach_workspace_outcome(
+                workspace,
+                outcome,
+                store=True,
+            )
+        if verified.decision == "canceled" or self._cancellation_requested():
+            return self._attach_workspace_outcome(
+                workspace,
+                self._caption_network_terminal_outcome(
+                    state="canceled",
+                    source=source,
+                    selection=selection,
+                    category="user_cancellation",
+                    message="The native-caption network action was canceled before a caption HTTP request completed.",
+                    audit=self._caption_network_audit(selection, "canceled"),
+                ),
+                store=True,
+            )
+        (
+            raw_segments,
+            caption_warnings,
+            status,
+            fetch_result,
+            redirected_resource,
+            redirect_count,
+        ) = self._download_caption(selection.selected_caption, selection.resource, workspace)
+        if redirected_resource is not None:
+            return self._attach_workspace_outcome(
+                workspace,
+                self._caption_network_approval_required(
+                    source=source,
+                    controls=selection.controls,
+                    metadata_probe=selection.metadata_probe,
+                    selected_caption=selection.selected_caption,
+                    resource=redirected_resource,
+                    warnings=selection.warnings,
+                    tools=selection.tools,
+                    javascript_support=selection.javascript_support,
+                    workspace=workspace,
+                    caption_inventory=selection.caption_inventory,
+                    executable_paths=dict(selection.executable_paths),
+                    question=selection.question,
+                    watch_request_id=selection.watch_request_id,
+                ),
+                store=True,
+            )
+        audit = self._caption_network_audit(
+            selection,
+            status,
+            bytes_read=(fetch_result.bytes_read if fetch_result is not None else None),
+            redirect_count=redirect_count,
+        )
+        outcome = self._caption_outcome_from_download(
+            source=source,
+            controls=selection.controls,
+            metadata_probe=selection.metadata_probe,
+            selected_caption=selection.selected_caption,
+            raw_segments=raw_segments,
+            caption_warnings=caption_warnings,
+            warnings=selection.warnings,
+            tools=selection.tools,
+            javascript_support=selection.javascript_support,
+            caption_inventory=selection.caption_inventory,
+            audit=audit,
+        )
+        outcome = self._with_caption_network_visual(
+            outcome,
+            selection=selection,
+            workspace=workspace,
+        )
+        return self._attach_workspace_outcome(workspace, outcome, store=True)
+
+    def _caption_network_failure(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        category: FailureCategory,
+        message: str,
+        workspace: _WorkspaceRecord | None = None,
+        audit: CaptionNetworkAudit | None = None,
+    ) -> EvidenceOutcome:
+        return self._failure_outcome(
+            state="stopped",
+            source=source,
+            controls=controls,
+            workspace=workspace,
+            caption_network_audit=audit,
+            failure=Failure(
+                stage="caption_network",
+                category=category,
+                message=message,
+                attempts=0,
+                disposition=(
+                    EvidenceDisposition(True, "retained", "same_task_evidence")
+                    if workspace is not None
+                    else CURRENT_SOURCE_NO_WORKSPACE
+                ),
+            ),
+        )
+
+    def _caption_network_terminal_outcome(
+        self,
+        *,
+        state: Literal["stopped", "canceled"],
+        source: Source,
+        selection: _CaptionNetworkSelection,
+        category: FailureCategory,
+        message: str,
+        audit: CaptionNetworkAudit,
+    ) -> EvidenceOutcome:
+        coverage = EvidenceCoverage("complete", "none", "none", "partial")
+        disposition = EvidenceDisposition(True, "retained", "same_task_evidence")
+        failure = Failure(
+            stage="caption_network",
+            category=category,
+            message=message,
+            attempts=0,
+            disposition=disposition,
+        )
+        report = _render_report(
+            state=state,
+            source=source,
+            metadata=selection.metadata_probe.metadata,
+            coverage=coverage,
+            answerability="uncertain",
+            warnings=selection.warnings,
+            tools=selection.tools,
+            javascript_support=selection.javascript_support,
+            controls=selection.controls,
+        )
+        return EvidenceOutcome(
+            state=state,
+            terminal=True,
+            source=source,
+            coverage=coverage,
+            answerability="uncertain",
+            warnings=selection.warnings,
+            failure=failure,
+            evidence=EvidenceBundle(metadata=selection.metadata_probe.metadata),
+            tools=selection.tools,
+            javascript_support=selection.javascript_support,
+            controls=selection.controls,
+            report_markdown=report,
+            caption_inventory=selection.caption_inventory,
+            caption_network_audit=audit,
+            disposition=disposition,
+        )
+
+    def _with_caption_network_visual(
+        self,
+        outcome: EvidenceOutcome,
+        *,
+        selection: _CaptionNetworkSelection,
+        workspace: _WorkspaceRecord,
+    ) -> EvidenceOutcome:
+        return self._with_visual_evidence(
+            outcome,
+            source=Source("url", selection.source_value, True),
+            metadata=selection.metadata_probe.metadata,
+            controls=selection.controls,
+            executable_paths=dict(selection.executable_paths),
+            question=selection.question,
+            workspace=workspace,
+        )
+
+    def _caption_outcome_from_download(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        metadata_probe: _SourceProbe,
+        selected_caption: CaptionChoice,
+        raw_segments: tuple[TranscriptSegment, ...] | None,
+        caption_warnings: tuple[str, ...],
+        warnings: tuple[str, ...],
+        tools: tuple[ToolStatus, ...],
+        javascript_support: JavaScriptSupport,
+        caption_inventory: tuple[CaptionInventoryItem, ...],
+        audit: CaptionNetworkAudit,
+    ) -> EvidenceOutcome:
         if raw_segments is None:
             return self._completed_outcome(
                 state="partial",
@@ -4636,6 +5204,8 @@ class WatchEvidenceRuntime:
                 tools=tools,
                 javascript_support=javascript_support,
                 caption_inventory=caption_inventory,
+                caption_network_audit=audit,
+                failure=self._caption_download_failure(audit.status),
             )
 
         scope = _transcript_scope(controls, metadata_probe.metadata.duration_seconds)
@@ -4688,6 +5258,77 @@ class WatchEvidenceRuntime:
             tools=tools,
             javascript_support=javascript_support,
             caption_inventory=caption_inventory,
+            caption_network_audit=audit,
+        )
+
+    @staticmethod
+    def _caption_network_audit(
+        selection: _CaptionNetworkSelection,
+        status: CaptionNetworkStatus,
+        *,
+        bytes_read: int | None = None,
+        redirect_count: int = 0,
+    ) -> CaptionNetworkAudit:
+        return CaptionNetworkAudit(
+            status=status,
+            hostname=selection.binding.origin.hostname,
+            purpose="retrieve_selected_native_caption",
+            selected_track_id=selection.binding.selected_track_id,
+            selected_format=selection.binding.selected_format,
+            byte_cap=selection.binding.byte_cap,
+            bytes_read=bytes_read,
+            redirect_count=redirect_count,
+        )
+
+    @staticmethod
+    def _caption_download_failure(status: CaptionNetworkStatus) -> Failure:
+        category_and_message: dict[CaptionNetworkStatus, tuple[FailureCategory, str]] = {
+            "unavailable": (
+                "caption_unavailable",
+                "The selected native caption is unavailable.",
+            ),
+            "response_too_large": (
+                "caption_response_too_large",
+                "The selected native caption exceeds the approved byte limit.",
+            ),
+            "parse_failed": (
+                "caption_parse",
+                "The selected native caption could not be parsed.",
+            ),
+            "http_failed": (
+                "caption_http",
+                "The native-caption service returned an unsuccessful response.",
+            ),
+            "transport_failed": (
+                "caption_transport",
+                "The native-caption request could not be completed.",
+            ),
+            "url_policy_failed": (
+                "caption_url_policy",
+                "The native-caption destination failed the public HTTPS policy.",
+            ),
+            "redirect_failed": (
+                "caption_redirect",
+                "The native-caption redirect failed its safety policy.",
+            ),
+            "failed": (
+                "caption_transport",
+                "Native-caption retrieval failed before a verified response was available.",
+            ),
+        }
+        category, message = category_and_message.get(
+            status,
+            (
+                "caption_transport",
+                "Native-caption retrieval did not produce transcript evidence.",
+            ),
+        )
+        return Failure(
+            stage="caption_network",
+            category=category,
+            message=message,
+            attempts=1,
+            disposition=EvidenceDisposition(True, "retained", "same_task_evidence"),
         )
 
     def _caption_inventory(
@@ -4749,16 +5390,31 @@ class WatchEvidenceRuntime:
     def _download_caption(
         self,
         selected_caption: CaptionChoice,
-        caption_url: str,
+        resource: CaptionResource,
         workspace: _WorkspaceRecord,
-    ) -> tuple[tuple[TranscriptSegment, ...] | None, tuple[str, ...]]:
+    ) -> tuple[
+        tuple[TranscriptSegment, ...] | None,
+        tuple[str, ...],
+        CaptionNetworkStatus,
+        CaptionFetchResult | None,
+        CaptionResource | None,
+        int,
+    ]:
         caption_name = f"caption.{selected_caption.format}"
+        # A redirect that needs a second human decision has already reserved a
+        # safely retained (possibly empty) output leaf.  Never overwrite it:
+        # use a fresh runtime-owned leaf for the separately approved action.
+        if caption_name in workspace.artifacts:
+            caption_name = (
+                f"caption-{secrets.token_urlsafe(12)}.{selected_caption.format}"
+            )
         output_fd: int | None = None
         artifact_finalized = False
+        fetch_result: CaptionFetchResult | None = None
         try:
             output_fd = self._create_workspace_artifact_output(workspace, caption_name)
-            self._caption_fetcher.fetch(
-                caption_url, output_fd, max_bytes=MAX_CAPTION_BYTES
+            fetch_result = self._caption_fetcher.fetch(
+                resource, output_fd, max_bytes=MAX_CAPTION_BYTES
             )
             self._finalize_workspace_artifact_output(
                 workspace, caption_name, "caption", output_fd
@@ -4768,16 +5424,81 @@ class WatchEvidenceRuntime:
                 workspace, caption_name
             )
             if len(caption_bytes) > MAX_CAPTION_BYTES:
-                return None, (
-                    "The selected native caption exceeds the safe parsing limit; transcript evidence is unavailable.",
+                return (
+                    None,
+                    (
+                        "The selected native caption exceeds the approved byte limit; transcript evidence is unavailable.",
+                    ),
+                    "response_too_large",
+                    fetch_result,
+                    None,
+                    fetch_result.redirect_count if fetch_result is not None else 0,
                 )
+        except CaptionRedirectApprovalRequired as error:
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, caption_name, "caption", output_fd
+                )
+            return None, (), "approved", None, error.resource, error.redirect_count
+        except CaptionResponseTooLarge as error:
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, caption_name, "caption", output_fd
+                )
+            return (
+                None,
+                (
+                    "The selected native caption exceeds the approved byte limit; transcript evidence is unavailable.",
+                ),
+                "response_too_large",
+                None,
+                None,
+                error.redirect_count,
+            )
+        except CaptionUnavailable as error:
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, caption_name, "caption", output_fd
+                )
+            return (
+                None,
+                (
+                    "The selected native caption is unavailable; transcript evidence is unavailable.",
+                ),
+                "unavailable",
+                None,
+                None,
+                error.redirect_count,
+            )
+        except CaptionNetworkError as error:
+            if not artifact_finalized:
+                self._retain_failed_workspace_artifact_output(
+                    workspace, caption_name, "caption", output_fd
+                )
+            return (
+                None,
+                (
+                    "Native caption retrieval failed its safety, redirect, HTTP, or transport checks; transcript evidence is unavailable.",
+                ),
+                _caption_network_status_for_error(error.code),
+                None,
+                None,
+                error.redirect_count,
+            )
         except (OSError, subprocess.SubprocessError):
             if not artifact_finalized:
                 self._retain_failed_workspace_artifact_output(
                     workspace, caption_name, "caption", output_fd
                 )
-            return None, (
-                "Native caption retrieval did not produce one verified caption file; transcript evidence is unavailable.",
+            return (
+                None,
+                (
+                    "Native caption retrieval did not produce one verified caption file; transcript evidence is unavailable.",
+                ),
+                "transport_failed",
+                None,
+                None,
+                0,
             )
         finally:
             if output_fd is not None:
@@ -4788,10 +5509,24 @@ class WatchEvidenceRuntime:
 
         segments = _parse_caption(selected_caption.format, caption_bytes)
         if segments is None:
-            return None, (
-                "The selected native caption could not be parsed; transcript evidence is unavailable.",
+            return (
+                None,
+                (
+                    "The selected native caption could not be parsed; transcript evidence is unavailable.",
+                ),
+                "parse_failed",
+                fetch_result,
+                None,
+                fetch_result.redirect_count if fetch_result is not None else 0,
             )
-        return segments, ()
+        return (
+            segments,
+            (),
+            "succeeded",
+            fetch_result,
+            None,
+            fetch_result.redirect_count if fetch_result is not None else 0,
+        )
 
     def _completed_outcome(
         self,
@@ -4807,6 +5542,8 @@ class WatchEvidenceRuntime:
         transcript: TranscriptEvidence | None = None,
         visual: VisualEvidence | None = None,
         caption_inventory: tuple[CaptionInventoryItem, ...] = (),
+        caption_network_audit: CaptionNetworkAudit | None = None,
+        failure: Failure | None = None,
     ) -> EvidenceOutcome:
         report = _render_report(
             state=state,
@@ -4828,7 +5565,7 @@ class WatchEvidenceRuntime:
             coverage=coverage,
             answerability="uncertain",
             warnings=warnings,
-            failure=None,
+            failure=failure,
             evidence=EvidenceBundle(
                 metadata=metadata, transcript=transcript, visual=visual
             ),
@@ -4837,6 +5574,7 @@ class WatchEvidenceRuntime:
             controls=controls,
             report_markdown=report,
             caption_inventory=caption_inventory,
+            caption_network_audit=caption_network_audit,
         )
 
     def _visual_route_requested(self, controls: WatchControls) -> bool:
@@ -4896,8 +5634,9 @@ class WatchEvidenceRuntime:
             transcript=outcome.evidence.transcript,
             visual=visual,
         )
+        state = outcome.state if outcome.state in {"stopped", "canceled"} else "partial"
         report = _render_report(
-            state="partial",
+            state=state,
             source=source,
             metadata=metadata,
             transcript=outcome.evidence.transcript,
@@ -4911,7 +5650,7 @@ class WatchEvidenceRuntime:
         )
         return replace(
             outcome,
-            state="partial",
+            state=state,
             coverage=coverage,
             warnings=warnings,
             evidence=evidence,
@@ -5887,7 +6626,7 @@ class WatchEvidenceRuntime:
     def _failure_outcome(
         self,
         *,
-        state: Literal["stopped", "failed"],
+        state: Literal["stopped", "failed", "canceled"],
         source: Source | None,
         failure: Failure,
         warnings: tuple[str, ...] = (),
@@ -5895,6 +6634,7 @@ class WatchEvidenceRuntime:
         javascript_support: JavaScriptSupport = JAVASCRIPT_NOT_CHECKED,
         controls: WatchControls | None = None,
         workspace: _WorkspaceRecord | None = None,
+        caption_network_audit: CaptionNetworkAudit | None = None,
     ) -> EvidenceOutcome:
         coverage = EvidenceCoverage("none", "none", "none", "none")
         retained_handle = (
@@ -5926,6 +6666,7 @@ class WatchEvidenceRuntime:
             ),
             workspace_id=workspace.workspace_id if workspace is not None else None,
             evidence_handle=retained_handle,
+            caption_network_audit=caption_network_audit,
             disposition=failure.disposition,
         )
 
@@ -6599,7 +7340,9 @@ def _audio_track_choice(candidate: _AudioCandidate) -> AudioTrackChoice:
 def _caption_candidates_from_ytdlp(
     data: Mapping[str, object],
 ) -> tuple[_CaptionCandidate, ...]:
-    formats_by_track: dict[tuple[str, CaptionType], dict[str, set[str]]] = {}
+    formats_by_track: dict[
+        tuple[str, CaptionType], dict[str, _CaptionEndpointAvailability]
+    ] = {}
     caption_catalogs: tuple[tuple[CaptionType, str], ...] = (
         ("manual", "subtitles"),
         ("automatic", "automatic_captions"),
@@ -6621,10 +7364,19 @@ def _caption_candidates_from_ytdlp(
                 if not isinstance(raw_format, Mapping):
                     continue
                 extension = _caption_format(raw_format.get("ext"))
-                caption_url = _caption_resource_url(raw_format.get("url"))
-                if extension is None or caption_url is None:
+                if extension is None:
                     continue
-                track_formats.setdefault(extension, set()).add(caption_url)
+                availability = track_formats.setdefault(
+                    extension, _CaptionEndpointAvailability()
+                )
+                resource = _caption_resource(raw_format.get("url"))
+                if resource is None:
+                    # Do not retain the extractor's unsafe URL.  Retain only
+                    # the fact that this track exposed a blocked retrieval
+                    # route so it cannot silently become a transcription path.
+                    availability.unsafe_route_seen = True
+                else:
+                    availability.safe_resources.add(resource)
     candidates: list[_CaptionCandidate] = []
     for (language, caption_type), formats in formats_by_track.items():
         if not formats:
@@ -6635,24 +7387,31 @@ def _caption_candidates_from_ytdlp(
         # format only when it has exactly one validated endpoint.
         retrievable_formats = {
             extension
-            for extension, urls in formats.items()
-            if len(urls) == 1 and extension in SUPPORTED_CAPTION_FORMATS
+            for extension, availability in formats.items()
+            if (
+                len(availability.safe_resources) == 1
+                and not availability.unsafe_route_seen
+                and extension in SUPPORTED_CAPTION_FORMATS
+            )
         }
         if retrievable_formats:
             selected_format = _preferred_caption_format(retrievable_formats)
-            caption_url = next(iter(formats[selected_format]))
+            resource = next(iter(formats[selected_format].safe_resources))
             usable = True
+            unsafe_route = False
         else:
             selected_format = _preferred_caption_format(set(formats))
-            caption_url = None
+            resource = None
             usable = False
+            unsafe_route = formats[selected_format].unsafe_route_seen
         candidates.append(
             _CaptionCandidate(
                 language=language,
                 caption_type=caption_type,
                 format=selected_format,
                 usable=usable,
-                caption_url=caption_url,
+                resource=resource,
+                unsafe_route=unsafe_route,
             )
         )
     return tuple(
@@ -6704,6 +7463,10 @@ def _caption_choice_from_inventory(item: CaptionInventoryItem) -> CaptionChoice:
 
 def _new_decision_handle() -> str:
     return f"decision_{secrets.token_urlsafe(24)}"
+
+
+def _new_caption_request_id() -> str:
+    return f"caption_request_{secrets.token_urlsafe(24)}"
 
 
 def _new_choice_id(kind: ChoiceKind) -> str:
@@ -7250,6 +8013,32 @@ def _prior_evidence_matches_selection(
         choice_kind="caption_track",
         decision_handle=selection.decision_handle,
         expected_choices=tuple(asdict(choice) for choice in selection.issued_choices),
+    )
+
+
+def _prior_evidence_matches_caption_network(
+    prior_evidence: object,
+    source: Source,
+    selection: _CaptionNetworkSelection,
+) -> bool:
+    if isinstance(prior_evidence, EvidenceOutcome):
+        prior_payload: object = prior_evidence.to_dict()
+    else:
+        prior_payload = prior_evidence
+    if not isinstance(prior_payload, Mapping):
+        return False
+    prior_source = prior_payload.get("source")
+    raw_approval = prior_payload.get("caption_network_approval")
+    return (
+        prior_payload.get("state") == "decision_required"
+        and prior_payload.get("terminal") is False
+        and prior_payload.get("choice_kind") == "caption_network"
+        and isinstance(prior_source, Mapping)
+        and prior_source.get("kind") == source.kind
+        and prior_source.get("value") == source.value
+        and prior_source.get("current") is True
+        and isinstance(raw_approval, Mapping)
+        and dict(raw_approval) == asdict(selection.approval)
     )
 
 
@@ -7972,33 +8761,34 @@ def _is_non_public_host(hostname: str) -> bool:
     return not address.is_global
 
 
-def _caption_resource_url(value: object) -> str | None:
-    if (
-        not isinstance(value, str)
-        or not value
-        or any(ord(character) <= 0x20 for character in value)
-    ):
+def _caption_network_receipt_from_request(watch_request: Mapping[str, object]) -> str | None:
+    raw_approval = watch_request.get("caption_network_approval")
+    if not isinstance(raw_approval, Mapping):
         return None
+    receipt = raw_approval.get("receipt")
+    return receipt if isinstance(receipt, str) else None
+
+
+def _caption_network_status_for_error(code: str) -> CaptionNetworkStatus:
+    if code == "http_failure":
+        return "http_failed"
+    if code in {
+        "redirect_malformed",
+        "redirect_downgrade",
+        "redirect_limit",
+        "redirect_loop",
+    }:
+        return "redirect_failed"
+    if code in {"unsafe_url", "unsafe_destination", "invalid_byte_cap"}:
+        return "url_policy_failed"
+    return "transport_failed"
+
+
+def _caption_resource(value: object) -> CaptionResource | None:
     try:
-        parsed = urlsplit(value)
-        # Accessing ``port`` validates malformed numeric port syntax.
-        _ = parsed.port
-    except ValueError:
+        return caption_resource(value)
+    except CaptionNetworkError:
         return None
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.username
-        or parsed.password
-        or not parsed.hostname
-        or _is_non_public_host(parsed.hostname)
-    ):
-        return None
-    return value
-
-
-def _validate_caption_resource_url(value: str) -> None:
-    if _caption_resource_url(value) is None:
-        raise OSError("The selected native caption URL is not a public HTTP(S) resource.")
 
 
 def _optional_text(value: object) -> str | None:
@@ -8091,6 +8881,7 @@ def _render_report(
         CaptionChoice | TranscriptionChoice | AudioTrackChoice
     ] = (),
     decision_handle: str | None = None,
+    caption_network_approval: CaptionNetworkApproval | None = None,
     consent: ConsentRequest | None = None,
     consent_handle: str | None = None,
 ) -> str:
@@ -8260,6 +9051,22 @@ def _render_report(
         lines.append(f"- Choice kind: `{choice_kind}`")
         if decision_handle is not None:
             lines.append(f"- Decision handle: `{decision_handle}`")
+        if caption_network_approval is not None:
+            lines.extend(
+                [
+                    "- Native-caption action: `retrieve_selected_native_caption`",
+                    "- Caption hostname: "
+                    f"`{caption_network_approval.hostname}`",
+                    "- Selected caption track: "
+                    f"`{caption_network_approval.selected_track_id}`",
+                    "- Caption format: "
+                    f"`{caption_network_approval.selected_format}`",
+                    "- Caption byte bound: "
+                    f"`{caption_network_approval.byte_cap}`",
+                    "- Caption approval receipt: "
+                    f"`{caption_network_approval.receipt}`",
+                ]
+            )
         for choice in choices:
             if isinstance(choice, CaptionChoice):
                 lines.append(

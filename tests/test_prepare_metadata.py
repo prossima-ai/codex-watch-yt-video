@@ -14,10 +14,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PREPARE_METADATA = (
     REPOSITORY_ROOT / ".agents" / "skills" / "watch" / "scripts" / "prepare_metadata.py"
 )
+PREPARE_VISUAL = (
+    REPOSITORY_ROOT / ".agents" / "skills" / "watch" / "scripts" / "prepare_visual.py"
+)
 SCRIPTS_DIRECTORY = PREPARE_METADATA.parent
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 from watch_evidence import WatchEvidenceRuntime  # noqa: E402
+from watch_transcription import (  # noqa: E402
+    TRANSCRIPTION_RELEASE_BLOCKER,
+    TRANSCRIPTION_RELEASE_ENABLED,
+    release_transcription_providers,
+)
 
 
 class PrepareMetadataTests(unittest.TestCase):
@@ -490,7 +498,7 @@ else:
         self.assertEqual(cleaned["state"], "cleanup_incomplete")
         self.assertEqual(cleaned["workspace_id"], initial["workspace_id"])
 
-    def test_session_offers_explicit_provider_choices_without_reading_credentials(self) -> None:
+    def test_release_facing_sessions_keep_transcription_disabled_without_reading_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             environment, command_log = self.configure_fake_ytdlp(
@@ -523,20 +531,20 @@ else:
                 self.stop_session(session)
             invocations = self.read_invocations(command_log)
 
-        self.assertEqual(outcome["state"], "decision_required")
-        self.assertEqual(outcome["choice_kind"], "transcription")
-        self.assertEqual(
-            [
-                (choice["action"], choice["provider"], choice["model"])
-                for choice in outcome["choices"]
-            ],
-            [
-                ("none", None, None),
-                ("transcribe", "openai", "whisper-1"),
-                ("transcribe", "groq", "whisper-large-v3"),
-            ],
-        )
+        self.assertEqual(outcome["state"], "partial")
+        self.assertIsNone(outcome["choice_kind"])
+        self.assertEqual(outcome["choices"], [])
         self.assertFalse(any("--format" in arguments for arguments in invocations))
+        self.assertNotIn(
+            "default_transcription_providers", PREPARE_METADATA.read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            "default_transcription_providers", PREPARE_VISUAL.read_text(encoding="utf-8")
+        )
+        self.assertFalse(TRANSCRIPTION_RELEASE_ENABLED)
+        self.assertIn("multipart/form-data", TRANSCRIPTION_RELEASE_BLOCKER)
+        self.assertIn("not merely nominal media-file size", TRANSCRIPTION_RELEASE_BLOCKER)
+        self.assertEqual(release_transcription_providers(), {})
 
     def test_private_network_url_aliases_stop_during_validation(self) -> None:
         for host in ("127.0.0.1", "127.1", "2130706433", "0x7f000001"):

@@ -69,7 +69,7 @@ A structural identity for one metadata field, Raw transcript segment position, o
 _Avoid_: Citation string, source link, evidence pointer
 
 **Raw transcript**:
-The normalized, timestamped source text derived from captions or an optional transcription provider, not the original VTT, provider response, or unprocessed rolling-caption cues.
+The normalized, timestamped source text derived from native captions, not the original VTT, provider response, or unprocessed rolling-caption cues. Release-facing transcription is disabled; a future provider-derived transcript requires its separate effective-request-size, validation, and approval gates.
 _Avoid_: Caption file, provider JSON, verbatim transcript
 
 **Current source**:
@@ -77,11 +77,19 @@ The most recent single, unambiguous video URL or resolved local video path estab
 _Avoid_: Active video, cached video, last upload
 
 **Choice kind**:
-The category of pending user selection in a `decision_required` outcome: caption track, audio track, or transcription.
+The category of pending user selection in a `decision_required` outcome: caption track, direct caption-network action, audio track, or a future transcription action. The release-facing action surface does not offer `transcription`.
 _Avoid_: Decision type, selection category
 
+**Caption-network action**:
+The separate direct native-caption retrieval action that pauses for explicit human approval before any caption DNS or HTTP request. It is not source-host approval, a generic network permission, or a transcription fallback.
+_Avoid_: Caption URL approval, downloader side effect, generic receipt action
+
+**Native-caption approval receipt**:
+An opaque, single-use same-session receipt bound to one Watch request, source, workspace, selected track, supported format, byte cap, and normalized HTTPS origin. It expires after five minutes or request end and is invalid after a use, denial, cancellation, failure, retry, or mismatch; it never contains or authorizes a raw caption URL.
+_Avoid_: URL, token, persistent grant, reusable consent
+
 **Decision handle**:
-An opaque task-session token emitted with a `decision_required` outcome. It binds sanitized choices to that session only; it neither selects a choice nor authorizes cross-task reuse.
+An opaque task-session token emitted with a `decision_required` outcome for sanitized choice lists. The caption-network action emits no separate decision handle: its native-caption approval receipt is the only action handle. Neither token selects a choice nor authorizes cross-task reuse.
 _Avoid_: Session key, persistent token, reusable cache key
 
 **Evidence coverage**:

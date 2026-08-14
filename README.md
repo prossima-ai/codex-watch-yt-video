@@ -5,8 +5,8 @@
 `watch` prepares evidence for exactly one public, unauthenticated
 yt-dlp-compatible HTTP(S) URL or one lawful local video. It is a
 repository-owned Codex Desktop skill; it is not a general-purpose downloader or
-export tool, editor, installer, credential manager, provider client without
-separate consent, or media library.
+export tool, editor, installer, credential manager, provider client, or media
+library. Transcription is release-disabled in the current action surface.
 
 ## Claim classification
 
@@ -28,13 +28,21 @@ Static analysis, hermetic tests, mocks, documentation review, and a closed issue
 - Captions-first preparation keeps metadata, transcript, and visual evidence separate, with distinct coverage and citations.
 - A supported public yt-dlp-compatible HTTP(S) URL needs source-host
   command-network approval before `yt-dlp` can contact its named host. Optional
-  transcription has separately selected provider, audio-track, fresh
-  audio-upload-consent, and provider-network gates; source-host and
+  transcription is release-disabled; a future provider would need separately
+  selected provider, audio track, fresh audio-upload consent, provider-network
+  approval, and the effective complete-request-size gate. Source-host and
   provider-network approvals are separate.
 - When `yt-dlp` returns a selected native-caption URL, the current runtime can
-  retrieve that public HTTP(S) caption resource directly under the same approved
-  source-network action. See the [security and privacy contract](docs/security-and-privacy.md#sources-and-local-processing)
-  for the resulting release/spec gate.
+  retrieve that public HTTPS caption resource only through a separate,
+  explicit, receipt-gated caption-network action. The approval exposes the
+  hostname, purpose, selected track, format, and byte cap—not a signed URL or
+  query string—and it expires or is consumed fail closed. Direct-caption
+  transport is a sealed Python `urllib.request` HTTPS path with no ambient
+  proxy, redirect, cookie, or authentication configuration. Direct-caption
+  retrieval remains release-disabled until hermetic coverage and one separately
+  approved live public-caption run produce adequate sanitized evidence. See the
+  [security and privacy contract](docs/security-and-privacy.md#direct-native-caption-networking)
+  for the network and redaction boundary.
 - No global media library, cross-task evidence cache, automatic reacquisition, automatic deletion, telemetry, analytics, or crash upload is part of v0.1.
 
 ## Canonical source and discovery
@@ -69,7 +77,8 @@ $HOME/.agents/skills/watch -> $REPO_ROOT/.agents/skills/watch
 It is a human-controlled outside-workspace action. The skill, its runtime, tests, and repository tooling never create, copy, update, repair, or remove a personal skill target. See [setup and troubleshooting](docs/setup-and-troubleshooting.md) before considering that action.
 
 Read the [security and privacy contract](docs/security-and-privacy.md) before
-using a source URL, choosing optional transcription, or requesting cleanup.
+using a source URL, approving the separate native-caption action, considering
+future transcription, or requesting cleanup.
 
 ## Documentation and known limits
 
@@ -87,3 +96,26 @@ v0.1 is macOS Codex Desktop only, private, and unlicensed for redistribution. Pu
 **Classification: confirmed. Evidence:** PR #43 / Issue #28’s merged record and the package-contract tests. No live Desktop probe, personal installation, media acquisition, or provider request was performed for #28.
 
 The repository includes hermetic package-contract tests for paths, metadata, routing policy, symlink integrity, and refusal behavior. Static package evidence does not prove live Desktop discovery, an already-open task's inventory refresh, a personal installation, sandbox approvals, media acquisition, provider behavior, provider retention, or live cleanup. No live media or provider request is part of package discovery validation.
+
+## Direct-caption and transcription release gates
+
+**Classification: implementation requirement. Evidence:** Decision #44,
+[the normative specification](docs/spec/watch-skill.md#direct-native-caption-retrieval),
+and hermetic tests. No live caption, provider, or release activity was performed
+for this implementation work.
+
+Direct native-caption retrieval accepts only a public HTTPS endpoint after a
+separate opaque, single-use, five-minute approval receipt that is bound to the
+same Watch request, source, session, workspace, selected track, format, byte cap,
+and normalized origin. Invalid, expired, denied, canceled, replayed, or
+mismatched receipts make no caption HTTP attempt. Redirects, DNS answers, byte
+limits, and user-visible redaction are fail closed; direct-caption failures do
+not fall back to transcription.
+
+Transcription and all provider contact remain release-disabled. A future selected
+provider needs a conservative provider-specific effective upload limit for the
+complete encoded request—not merely nominal media-file size—including
+multipart/form-data boundaries, per-part headers, metadata, and every other
+request-body overhead, followed by a separate validation plan and separate
+explicit human approval. A human release decision, if one is later made, does
+not authorize provider enablement or a live request.

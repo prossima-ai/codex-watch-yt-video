@@ -25,6 +25,13 @@ from urllib.request import (
 
 
 ProviderName = Literal["openai", "groq"]
+TRANSCRIPTION_RELEASE_ENABLED = False
+TRANSCRIPTION_RELEASE_BLOCKER = (
+    "Provider transcription is release-disabled until each selected provider has "
+    "a conservative effective request-size limit that includes multipart/form-data "
+    "boundaries, headers, metadata, and every other request-body overhead, not "
+    "merely nominal media-file size."
+)
 ProviderFailureCategory = Literal[
     "transient_network",
     "rate_limit",
@@ -282,6 +289,12 @@ def default_transcription_providers() -> dict[ProviderName, TranscriptionProvide
             transport=UrllibProviderTransport(),
         ),
     }
+
+
+def release_transcription_providers() -> dict[ProviderName, TranscriptionProvider]:
+    """Keep every release-facing action free of provider clients until the gate closes."""
+
+    return {}
 
 
 def _environment_credential_reader(name: str) -> str | None:

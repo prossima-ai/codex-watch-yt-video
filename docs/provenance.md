@@ -13,10 +13,39 @@ All material provenance claims use these labels:
   qualifyingly live-verified.
 - `unsupported/out of scope` — intentionally excluded v0.1 behavior.
 
-## Pinned implementation and specification record
+## Decision #44 implementation evidence record
 
-**Classification: confirmed. Evidence:** fresh canonical-main fetch on
-2026-08-14 and local `git rev-parse HEAD` in the dedicated Issue #29 worktree.
+**Classification: implementation requirement. Evidence:** the pinned
+`origin/main` base, Decision #44's approved contract, and local worktree
+inspection. This is a live-evidence and release-status record, not authorization
+for a caption request, provider request, deployment, publication, or release.
+
+| Record | Value | Boundary |
+| --- | --- | --- |
+| Governing decision | [Decision #44](https://github.com/prossima-ai/codex-watch-yt-video/issues/44) | It approves the fail-closed direct native-caption contract and release gates; it does not approve a live action. |
+| Pinned implementation base | `35a0c29bc9e264f533837adf40424aa95e55dcc1` | Canonical `origin/main` base for this implementation workflow and the squash commit from PR #45. |
+| Implementation commit | `PENDING — final local implementation commit has not yet been created` | Do not substitute a branch name, worktree HEAD, or an invented hash. Root records the intentional local commit only after final validation and reviews. |
+| Documentation and code changes | `PENDING root final validation` | The final record must name the direct-caption receipt, URL policy, redirects, redaction, byte cap, typed outcomes, no-fallback path, and transcription-disablement changes actually present in the final diff. |
+| Focused and complete validation | `PENDING root final validation` | Record exact commands, exit status, test count, static/package/skill checks, and any environment-limited checks after the final diff exists. |
+| Standards review | `PENDING root final validation` | An independent review must inspect the complete diff from the pinned base and record every finding and resolution. |
+| Spec review | `PENDING root final validation` | A separate independent review must inspect Decision #44, this specification, the prompt contract, and the complete diff. |
+| Transcription disablement | `PENDING root final validation` | Final evidence must show the release-facing action surface cannot read provider credentials, invoke provider clients, or route direct-caption outcomes into transcription. |
+| Live public-caption validation | `BLOCKED` | No separate explicit human approval has been granted for one named public-caption run. Hermetic tests cannot replace it. |
+| Provider validation | `BLOCKED` | No human has selected one provider, no conservative effective complete-request-size limit has been accepted, and no separate provider approval has been granted. |
+| Human release decision | `PENDING` | A human must review the completed evidence and record either the specifically defined approved scope or the exact blockers. No decision has been made here. |
+
+No live caption retrieval, live caption validation, transcription, provider
+credential read, provider request, provider validation, deployment, publication,
+or release occurred while creating this record. A future live public-caption
+approval applies only to the named one run; a future provider approval is a
+separate gate and cannot be inferred from it.
+
+## Historical Issue #29 implementation and specification record
+
+**Classification: confirmed. Evidence:** historical fresh canonical-main fetch
+on 2026-08-14 and local `git rev-parse HEAD` in the dedicated Issue #29 worktree.
+This section is retained as the #29 record, not as the Decision #44 starting
+point; the Decision #44 table above is authoritative for this workflow.
 
 | Record | Value | Boundary |
 | --- | --- | --- |
@@ -96,16 +125,18 @@ the documented provider-size discrepancy.
 The remaining live/release gates are:
 
 - Desktop/package/authority checks on the target macOS Codex Desktop host;
-- a just-in-time approved public-media run for captions-first and visual evidence;
-- one selected-provider smoke with a disposable/restricted credential, fresh
-  provider-specific consent, provider-network approval, and redacted evidence;
-- a resolution of the 25,165,823-byte versus documented 25,000,000-byte limit
-  discrepancy before a provider is offered for a release; and
-- an explicit decision reconciling direct selected-caption retrieval with the
-  source-contact approval contract: route it through `yt-dlp` or amend the
-  approved policy and disclosure before release; and
+- one separately approved public-caption run for the Decision #44 direct action,
+  with sanitized host/redirect validation, bounded byte count, typed outcome, and
+  proof that transcription/provider code did not run;
+- a conservative provider-specific effective complete-request-size limit before
+  any provider is offered for a release. It must include multipart/form-data
+  boundaries, per-part headers, metadata, and all other request-body overhead,
+  not merely nominal media-file size; then a human-selected provider, a separate
+  validation plan, and separate explicit human approval immediately before that
+  provider activity; and
 - a release record that captures current provider documentation, source/tool
-  versions, live outcomes, approval records, and immutable release revision.
+  versions, live outcomes, approval records, independent reviews, and immutable
+  release revision, followed by an explicit human decision for the stated scope.
 
 An unavailable authorization, source, provider, or evidence record is `BLOCKED`
 or `UNVERIFIED`, never a pass. The unselected provider must not be marketed as
