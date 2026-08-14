@@ -1,6 +1,6 @@
 ---
 name: watch
-description: Inspect exactly one public unauthenticated video URL or one lawful local video when the user asks to watch, analyze, summarize, or answer from it. Use explicitly with $watch or implicitly only for a clear request about one supplied or Current source; exclude downloads, edits, private or authenticated media, playlists, and ambiguous or multiple sources.
+description: Inspect exactly one public unauthenticated video URL or one lawful local video when the user asks to inspect, analyze, summarize, or answer from it. Use explicitly with $watch or implicitly only for a clear request about one supplied or Current source; exclude downloads, edits, code requests, private, authenticated, or live media, playlists, and ambiguous or multiple sources.
 ---
 
 # Watch
