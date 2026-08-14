@@ -1,0 +1,6 @@
+interface:
+  display_name: "Watch"
+  short_description: "Inspect one supplied video as grounded evidence"
+  default_prompt: "$watch <one public unauthenticated video URL or lawful local video> [optional question]"
+policy:
+  allow_implicit_invocation: true
