@@ -209,6 +209,9 @@ class DocumentationContractTests(unittest.TestCase):
             "Standards review | `PASS — no unresolved findings`",
             "Spec review | `PASS — no unresolved findings`",
             "Live public-caption validation | `BLOCKED`",
+            "OpenAI `whisper-1` was explicitly selected",
+            "OpenAI `whisper-1` local effective-cap work",
+            "233 tests",
             "Release gate status | `BLOCKED`",
             "Human release decision | `PENDING`",
         ):

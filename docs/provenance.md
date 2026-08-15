@@ -31,8 +31,8 @@ for a caption request, provider request, deployment, publication, or release.
 | Spec review | `PASS — no unresolved findings` | Independent complete-diff review against Decision #44, this specification, the implementation request, and authorization/release gates; every actionable finding below was resolved and re-reviewed. |
 | Transcription disablement | `PASS — release surface disabled` | `prepare_metadata.py` and `prepare_visual.py` use `release_transcription_providers()`, which returns no providers; tests prove no release-facing transcription choice, credential read, provider client, or direct-caption fallback. The provider-effective-size gate remains unresolved. |
 | Live public-caption validation | `BLOCKED` | No separate explicit human approval has been granted for one named public-caption run. Hermetic tests cannot replace it. |
-| Provider validation | `BLOCKED` | No human has selected one provider, no conservative effective complete-request-size limit has been accepted, and no separate provider approval has been granted. |
-| Release gate status | `BLOCKED` | Missing controls/evidence are: one separately approved live public-caption run with adequate sanitized evidence; conservative provider-specific complete-request-size limits; selected-provider validation under separate approval; and an explicit human release decision. |
+| Provider validation | `BLOCKED` | OpenAI `whisper-1` was explicitly selected for local implementation. Its 20,000,000-byte complete multipart-request cap and 19,000,000-byte audio budget have hermetic coverage; no credential read, provider contact, live validation, or enablement is authorized. A provider-specific validation plan and separate explicit human approval remain required. |
+| Release gate status | `BLOCKED` | Missing controls/evidence are: one separately approved live public-caption run with adequate sanitized evidence; an OpenAI `whisper-1` validation under separate approval; current provider disclosure/account-limit confirmation; and an explicit human release decision. |
 | Human release decision | `PENDING` | No human decision has been requested or received. A human must review this evidence and explicitly record either `Approved for the specifically defined release scope` or `Blocked`, with exact missing evidence or controls. |
 
 No live caption retrieval, live caption validation, transcription, provider
@@ -59,6 +59,28 @@ validator, so no absent tool was represented as having run. These are hermetic
 or static checks: they do not prove live DNS, public-host behavior, redirect
 behavior, media compatibility, Codex Desktop discovery, provider behavior, or a
 release.
+
+### OpenAI `whisper-1` local effective-cap work
+
+**Classification: implementation requirement. Evidence:** explicit human
+selection for local implementation on 2026-08-15, the isolated
+`codex/whisper-1-effective-request-cap` worktree, and hermetic tests. This
+selection authorizes no provider activity.
+
+- The OpenAI `whisper-1` descriptor reserves a 19,000,000-byte audio budget
+  and enforces a 20,000,000-byte complete multipart request cap before a
+  credential read or HTTP attempt. The cap counts audio bytes, boundaries,
+  per-part headers, fields, and metadata; a generic audio-only cap is refused
+  when no complete cap exists.
+- `python3 -B -m unittest tests.test_provider_transcription tests.test_prepare_metadata tests.test_documentation_contract -v` — **81 tests**, exit `0`.
+- `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` — **233 tests**, exit `0`.
+- `python3 -B -m compileall -q .agents/skills/watch/scripts tests`, `git diff --check 12721251ff0713a66a3fe8be077dbeee789d6e7b`, and `python3 /Users/ashishpratapsingh/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/watch` — exit `0`; the validator reported `Skill is valid!`.
+
+All transport/opening seams in these tests are fakes. No real credential was
+read, no provider endpoint was contacted, no audio left the machine, and
+transcription remains release-disabled. This evidence does not validate an
+account, provider documentation freshness, live request compatibility, or a
+provider response.
 
 ### Independent review findings and resolutions
 
