@@ -1,0 +1,339 @@
+{
+  "schema_version": "issue30-evidence-v1",
+  "issue": 30,
+  "recorded_on": "2026-08-15",
+  "base_revision": "dcf58a30090c56a9ee04addf4d706a5a85815133",
+  "implementation_revision": "fb3ee3c18684c366ba0609997b1beb1e1d7c3883",
+  "specification_revision": "dcf58a30090c56a9ee04addf4d706a5a85815133",
+  "scope": {
+    "classification": "offline-hermetic-and-local-synthetic-qualification",
+    "live_activity": false,
+    "closure_rows": [
+      "H-01", "H-02", "H-03", "H-04", "H-05", "H-06", "H-07",
+      "H-08", "H-09", "H-10", "S-01", "S-02", "S-03", "S-04"
+    ]
+  },
+  "environment": {
+    "os": "macOS 26.6 (25G72)",
+    "python": "3.13.3",
+    "yt_dlp": "2026.07.04",
+    "ffmpeg": "9.0",
+    "ffprobe": "9.0"
+  },
+  "h09_h11_reconciliation": {
+    "h09": "direct_native_caption_opaque_receipt_and_network_safety",
+    "h11": "non_regression_only_not_an_issue30_closure_row",
+    "reason": "The current specification governs: H-09 is direct native-caption receipt and network safety. Historical provider-consent wording is superseded. H-11 release-facing transcription disablement and the future complete-request-size gate are retained as non-regression evidence, not an Issue #30 closure row."
+  },
+  "commands": [
+    {
+      "command": "python3 -B -m unittest discover -s tests -p 'test_issue30*.py' -v",
+      "result": "PASS: 29 tests in 61.455s",
+      "scope": "Issue #30 hermetic, synthetic, and evidence-contract tests"
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tests -p 'test_caption*.py' -q",
+      "result": "PASS: 51 tests in 0.232s",
+      "scope": "mapped native-caption receipt, fetch, and runtime regressions"
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tests -p 'test_workspace_lifecycle.py' -q",
+      "result": "PASS: 23 tests in 0.127s",
+      "scope": "mapped workspace lifecycle and cleanup regressions"
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tests -p 'test_*.py' -q",
+      "result": "PASS: 262 tests in 114.343s",
+      "scope": "complete repository suite"
+    },
+    {
+      "command": "python3 -B -m compileall -q .agents/skills/watch/scripts tests",
+      "result": "PASS",
+      "scope": "syntax compilation only"
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tests -p 'test_skill_package_contract.py' -q",
+      "result": "PASS: 18 tests in 0.051s",
+      "scope": "repository-owned package and discovery contract"
+    },
+    {
+      "command": "python3 /Users/ashishpratapsingh/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/watch",
+      "result": "PASS: Skill is valid!",
+      "scope": "skill package structure only"
+    }
+  ],
+  "rows": {
+    "H-01": {
+      "normative_meaning": "Invalid inputs and unsupported triggers refuse before runtime side effects.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Offline runner call count remains zero for malformed input and unsupported trigger cases.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h01_input_and_trigger_refusal_stops_before_runtime_side_effects"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["Controlled offline seams were used; no source URL or Desktop trigger was exercised."]
+    },
+    "H-02": {
+      "normative_meaning": "Adapter command arguments retain hostile source text as one data value.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Captured argv retains hostile source text as one argument and caption fetching remains uncalled.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h02_adapter_arguments_keep_hostile_sources_as_one_data_value"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["The fixture proves argument-array handling, not an extractor invocation against a live source."]
+    },
+    "H-03": {
+      "normative_meaning": "A missing local tool returns typed guidance without attempting installation.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Injected executable lookup returns none; the result is typed guidance and the offline runner has no calls.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h03_missing_tool_has_typed_guidance_without_an_installer"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"}
+      ],
+      "limits": ["No installer, package manager, or host-level dependency action was invoked."]
+    },
+    "H-04": {
+      "normative_meaning": "Invalid controls stop before I/O and transcript-only mode selects no ordinary visual frames.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Invalid detail controls leave runner calls empty; transcript-only selection reports zero ordinary frames.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h04_controls_reject_before_io_and_transcript_selects_zero_ordinary_frames"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["This does not establish visual behavior on arbitrary real media."]
+    },
+    "H-05": {
+      "normative_meaning": "Focus, cue, and track selection require valid same-task opaque state and reject invalid controls before new I/O.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Valid focus and cues normalize; invalid focus/cues leave calls unchanged; an opaque track choice is accepted only in the issuing task.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h05_opaque_track_choice_requires_one_valid_same_task_selection",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h05_focus_and_cue_controls_are_normalized_or_refused_before_new_io"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"}
+      ],
+      "limits": ["Only controlled task state and metadata were used."]
+    },
+    "H-06": {
+      "normative_meaning": "The answer compiler preserves conflicting streams and their citations rather than merging them into one fact.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Constructed caption and visual observations retain separate provenance and conflicting text in the compiled answer.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h06_answer_compiler_keeps_conflicting_streams_and_derived_times_separate"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-answer-source", "sha256": "7a6620c4d90a146faa965047841c981080c1be9725688fd2ad9a7cc32f22072c"}
+      ],
+      "limits": ["The citations originate in a constructed evidence index, not a live media run."]
+    },
+    "H-07": {
+      "normative_meaning": "Cancellation and typed failures do not emit an evidence conclusion or continue work; bounded retry does not select another provider.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "A canceled controlled session leaves the runner and caption fetcher uncalled and withholds an answer; mocked retry exhaustion stays bounded without fallback.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h07_typed_cancellation_and_failure_do_not_emit_evidence_conclusions",
+        "tests/test_provider_transcription.py::ProviderTranscriptionTests.test_retry_exhaustion_is_bounded_and_never_falls_back_providers"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["Cancellation and retry timing use fakes; no host cancellation, provider request, or credential read occurred."]
+    },
+    "H-08": {
+      "normative_meaning": "Same-task reuse avoids new commands and invalid cleanup revokes reuse state.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "A valid same-task handle reuses immutable evidence without runner calls; invalid cleanup makes later reuse fail closed.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h08_opaque_reuse_skips_new_commands_and_invalid_cleanup_revokes_it"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["No real workspace or source acquisition state was reused."]
+    },
+    "H-09": {
+      "normative_meaning": "Direct native-caption receipt binding, expiry, invalidation, public-address pinning, redirects, byte and EOF limits, parse failures, redaction, and no-provider fallback fail closed.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Injected clock, resolver, transport, and fetcher prove binding mismatch, nonpublic address, cross-origin redirect, surplus/truncated body, and malformed caption paths stop without a second connect or provider call.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h09_receipts_bind_all_fields_and_rejected_followups_do_zero_fetches",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h09_fake_public_resolver_pins_answers_and_rejects_nonpublic_answers",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h09_redirects_reresolve_and_cross_origin_pauses_before_second_connect",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h09_byte_eof_and_caption_format_failures_are_typed_without_provider_fallback",
+        "tests/test_caption_network.py::CaptionReceiptTests.test_receipt_cannot_move_between_action_source_session_destination_or_bindings",
+        "tests/test_caption_network.py::CaptionReceiptTests.test_expiry_has_a_deterministic_fail_closed_boundary",
+        "tests/test_caption_network.py::CaptionReceiptTests.test_denial_cancellation_and_request_end_invalidate_receipts",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_public_https_accepts_public_ipv4_and_ipv6_and_pins_transport_addresses",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_private_link_local_multicast_unspecified_reserved_and_malformed_dns_answers_fail_before_http",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_redirects_are_revalidated_limited_loop_checked_and_never_downgrade",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_public_cross_origin_redirect_requires_a_new_approval_and_private_cross_origin_fails",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_declared_and_streamed_byte_caps_are_strict_and_never_return_partial_success",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_urllib_response_adapter_waits_for_eof_and_detects_a_delayed_byte_beyond_an_underreported_content_length",
+        "tests/test_caption_network.py::BoundedCaptionFetcherTests.test_truncated_declared_caption_body_fails_instead_of_returning_parseable_partial_data",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_invalid_or_expired_caption_receipts_make_zero_fetch_attempts",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_rejected_caption_network_followups_burn_a_known_receipt_before_fetch",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_caption_denial_is_terminal_and_direct_caption_failure_never_offers_or_calls_transcription",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_cross_origin_redirect_returns_a_new_caption_approval_without_following_it",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_caption_retrieval_urls_remain_internal_to_the_runtime",
+        "tests/test_caption_evidence.py::CaptionEvidenceTests.test_malformed_native_caption_is_a_truthful_partial_result"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-caption-network-source", "sha256": "938c0b6d3f44ef56bec9adc6f0ca2fb2b63457321e662619fd0c29b6fbef1448"}
+      ],
+      "limits": ["Resolver, transport, clock, and caption fetcher were injected fakes; no DNS lookup, redirect, caption request, provider request, or credential read occurred."]
+    },
+    "H-10": {
+      "normative_meaning": "Cleanup rejects hostile or altered workspace targets, preserves caller-owned paths, and for a validated macOS workspace returns cleanup_incomplete with no deletion while revoking reuse.",
+      "outcome": "PASS",
+      "proof_scope": "hermetic",
+      "trace": "Traversal, selector, marker, manifest, lock, leaf symlink/hardlink, workspace/ancestor replacement, and valid-workspace cases preserve sentinels; the valid macOS path returns cleanup_incomplete and revokes reuse.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h10_cleanup_refuses_untrusted_selector_and_preserves_caller_files",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h10_invalid_selectors_refuse_without_touching_current_evidence",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h10_control_and_leaf_tampering_refuses_and_revokes_reuse",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h10_identity_and_ancestor_replacements_refuse_without_deletion",
+        "tests/test_issue30_hermetic_qualification.py::Issue30HermeticQualificationTests.test_h10_valid_owned_workspace_is_fail_closed_on_macos",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_cleanup_refuses_unknown_altered_symlinked_and_unlocked_targets",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_cleanup_refuses_workspace_and_ancestor_symlink_replacements",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_cleanup_refuses_a_renamed_workspace_even_when_its_old_path_is_absent",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_fresh_runtime_refuses_invalid_or_tampered_recovery_selectors",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_cleanup_deferred_preserves_reuse_until_the_competing_lock_releases",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_fresh_runtime_defers_recovered_cleanup_while_live_lock_is_held",
+        "tests/test_workspace_lifecycle.py::WorkspaceLifecycleTests.test_cleanup_is_explicit_and_removes_only_the_validated_workspace"
+      ],
+      "artifacts": [
+        {"id": "hermetic-qualification-source", "sha256": "dab59ad6f4de28322908943b905cbafe50cf1787ba3d38ff1a90a867710d1bd2"},
+        {"id": "watch-evidence-source", "sha256": "ce8611c417914818405a7ed3200c1d2ba21e75a62d42565da2983135a379e724"}
+      ],
+      "limits": ["Current macOS behavior is deliberately fail-closed: this is not proof of owned-artifact deletion or live cleanup."]
+    },
+    "S-01": {
+      "normative_meaning": "Versioned generated ground-truth media covers cut-heavy, static, held-slide-small-change, portrait, silent, multi-track, captioned spoken-content, and scale roles while preserving one transcript/visual contradiction.",
+      "outcome": "PASS",
+      "proof_scope": "synthetic",
+      "trace": "Two temporary corpus generations yield canonical truth manifests; local probe metadata confirms source roles, geometry, language tracks, and hashes.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_versioned_truth_template_declares_construction_and_expected_conflict",
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_generated_fixture_manifest_covers_the_required_fixture_roles",
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_generated_sources_are_hashed_and_expose_the_expected_tracks",
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_two_fresh_generated_corpora_have_identical_canonical_truth_manifests"
+      ],
+      "artifacts": [
+        {"id": "synthetic-generator-source", "sha256": "f0338c053980cba27bd4dc856ec6537c59dae7c88a2cef9088fc757c57528dcf"},
+        {"id": "synthetic-qualification-source", "sha256": "da033017f444818538aa8b1364ea84cc73a6651968cc017fb5651dcb38506628"},
+        {"id": "truth-template", "sha256": "ad9c5693f46fb28b9cf0b374838dc9fed8e6fd85f9c1246a1938dd1cf5c4cb00"},
+        {"id": "generated-truth-manifest", "sha256": "68da8be19842d3e112c671067d2868d094e8678146ebbc7b5d9ac79523410b0f"}
+      ],
+      "limits": ["All source media was generated in a temporary directory; hashes record one local run and do not prove public-media compatibility."]
+    },
+    "S-02": {
+      "normative_meaning": "Local 768 and 1024 JPEG extraction respects the bounded inspector escalation boundary.",
+      "outcome": "PASS",
+      "proof_scope": "synthetic",
+      "trace": "Generated cut-heavy frames are JPEGs at bounded widths; the recording inspector observes one reasoned 1024-pixel detail escalation.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_actual_local_extraction_is_jpeg_bounded_and_can_escalate_once"
+      ],
+      "artifacts": [
+        {"id": "synthetic-qualification-source", "sha256": "da033017f444818538aa8b1364ea84cc73a6651968cc017fb5651dcb38506628"},
+        {"id": "generated-cut-heavy-source", "sha256": "22294ff36ee0555618dd3c9e33f32c0890d8766cec3efc6adf72e51dbadc5ef8"}
+      ],
+      "limits": ["This establishes only the local FFmpeg fixture path, not real-media decoding or visual semantics."]
+    },
+    "S-03": {
+      "normative_meaning": "Transcript, efficient, balanced, and token-burner modes select 0, 50, 100, and at least 251 chronological frames respectively, with a 2fps-or-lower scale fixture.",
+      "outcome": "PASS",
+      "proof_scope": "synthetic",
+      "trace": "A 340-second, 1fps scale source produces the asserted bounded mode counts, chronological batches, and transcript cue selection rationale.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_generated_fixture_manifest_covers_the_required_fixture_roles",
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_scale_modes_have_exact_caps_and_chronological_batches"
+      ],
+      "artifacts": [
+        {"id": "synthetic-qualification-source", "sha256": "da033017f444818538aa8b1364ea84cc73a6651968cc017fb5651dcb38506628"},
+        {"id": "generated-scale-source", "sha256": "d94f0e225e6ad8e2cca0ed8088177a4b592c21ffadc351fa27cfa38cfd11c7e4"}
+      ],
+      "limits": ["The count and chronology are fixture properties; no live source duration or extraction behavior is proved."]
+    },
+    "S-04": {
+      "normative_meaning": "A fresh reviewer independently validates a visible claim using no generator, truth-manifest, transcript, expected-answer, or prior-review access.",
+      "outcome": "PASS",
+      "proof_scope": "synthetic",
+      "trace": "A fresh non-forked reviewer inspected only frame-001, time 1, and the candidate claim from the multi-track contradiction fixture, returning SUPPORTS with a visual observation.",
+      "approval_status": "not_required_offline",
+      "tests": [
+        "tests/test_issue30_synthetic_qualification.py::SyntheticQualificationTests.test_s04_review_bundle_exposes_only_frame_identity_time_and_candidate_claim",
+        "tests/test_issue30_evidence_contract.py::Issue30EvidenceContractTests.test_committed_record_is_complete_pinned_and_keeps_s04_review_blind"
+      ],
+      "artifacts": [
+        {"id": "s04-review-input", "sha256": "1da1c6ffb70e85349d09642c4dc944ea78827a53fe8b4b718b7de3a1f9f87d97"},
+        {"id": "s04-review-frame", "sha256": "56c0d0064a01f7ed4f4b9003e5ebf2e81d7f862d353c5afcfd87c0f78bee4311"},
+        {"id": "s04-review-output", "sha256": "4848e5a668ee553db793d5f7472c49fbb18b2fcd33e6eb492d1600b529a97697"}
+      ],
+      "limits": ["The independent observation concerns one generated local frame and does not validate any real source or claim beyond it."]
+    }
+  },
+  "non_regression": {
+    "H-11": {
+      "classification": "non_closure_regression_evidence",
+      "outcome": "PASS",
+      "tests": [
+        "tests/test_prepare_metadata.py::PrepareMetadataTests.test_release_facing_sessions_keep_transcription_disabled_without_reading_credentials",
+        "tests/test_documentation_contract.py::DocumentationContractTests.test_transcription_is_release_disabled_pending_effective_request_size_gate"
+      ],
+      "artifacts": [
+        {"id": "prepare-metadata-source", "sha256": "6ff74d017787ba62dec672017be01d2b447d3bb35dec4442c7d12cf6200f9c20"},
+        {"id": "prepare-visual-source", "sha256": "8d08b2cda78baf2d21eea7cd8f5a792354d034bca23743e708dde1d50de75450"},
+        {"id": "watch-transcription-source", "sha256": "f0a65e7cab25b2d5d83f91bc5e6878c637e17dee17fd268dc7e58ddd4c37cc79"}
+      ],
+      "limits": ["This does not close H-11, validate a provider, authorize provider activity, or satisfy L-02."]
+    }
+  },
+  "unproven": [
+    "Codex Desktop package discovery or sandbox approval behavior",
+    "live public-media acquisition, DNS, redirect, or caption retrieval behavior",
+    "provider account, credential, request, response, or transcription behavior",
+    "live workspace cleanup or owned-artifact deletion",
+    "a human release decision or authorization for any live activity"
+  ],
+  "reviews": {"standards": "PASS", "spec": "PASS"}
+}

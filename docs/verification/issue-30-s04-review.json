@@ -1,0 +1,32 @@
+{
+  "schema_version": "issue30-s04-review-v1",
+  "implementation_revision": "fb3ee3c18684c366ba0609997b1beb1e1d7c3883",
+  "result": "PASS",
+  "reviewer_method": "fresh non-forked Codex reviewer using local-image inspection",
+  "reviewer_visible_context": {
+    "frame_id": "frame-001",
+    "source_absolute_time_seconds": 1,
+    "candidate_claim": "At the cited time, the frame shows a blue field with a centered brighter blue rectangle."
+  },
+  "withheld_from_reviewer": [
+    "generator source",
+    "truth manifest",
+    "transcript",
+    "expected answer",
+    "prior review output"
+  ],
+  "review_input_sha256": "1da1c6ffb70e85349d09642c4dc944ea78827a53fe8b4b718b7de3a1f9f87d97",
+  "frame_sha256": "56c0d0064a01f7ed4f4b9003e5ebf2e81d7f862d353c5afcfd87c0f78bee4311",
+  "review_output": {
+    "frame_id": "frame-001",
+    "inspected": true,
+    "verdict": "SUPPORTS",
+    "observation": "A blue field contains a centered, brighter blue rectangle."
+  },
+  "review_output_sha256": "4848e5a668ee553db793d5f7472c49fbb18b2fcd33e6eb492d1600b529a97697",
+  "limits": [
+    "The reviewed frame came from the generated multi-track fixture containing the transcript/visual contradiction.",
+    "This is one independent review of one generated local frame, not a live-media result.",
+    "The generated image and review packet remain temporary artifacts and are not committed."
+  ]
+}

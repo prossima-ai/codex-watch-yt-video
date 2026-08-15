@@ -1,0 +1,71 @@
+{
+  "schema_version": "issue30-synthetic-v1",
+  "seed": "issue30-visible-ground-truth-20260815",
+  "hash_policy": "generated-at-run-sha256",
+  "fixture_roles": [
+    "cut-heavy",
+    "static",
+    "held-slide-small-change",
+    "portrait",
+    "silent",
+    "captioned-spoken-content",
+    "multi-track",
+    "scale"
+  ],
+  "construction": {
+    "image_format": "ppm-p6",
+    "cut_geometry": [1024, 576],
+    "portrait_geometry": [180, 320],
+    "scale_geometry": [128, 72],
+    "scale_duration_seconds": 340,
+    "scale_frame_rate": 1,
+    "caption_track_format": "srt"
+  },
+  "expected_source_absolute_facts": [
+    {
+      "fixture": "multi-track",
+      "time_seconds": 1,
+      "stream": "visual",
+      "fact": "A blue field contains a centered brighter blue rectangle."
+    },
+    {
+      "fixture": "held-slide-small-change",
+      "time_seconds": 1,
+      "stream": "visual",
+      "fact": "The held purple slide adds one small yellow square."
+    },
+    {
+      "fixture": "multi-track",
+      "time_seconds": 1,
+      "stream": "transcript",
+      "fact": "The panel is green."
+    }
+  ],
+  "cue_times_seconds": [1, 4],
+  "expected_track_metadata": {
+    "multi-track": {
+      "stream_types": ["video", "audio", "audio", "subtitle"],
+      "audio_languages": ["eng", "spa"],
+      "subtitle_language": "eng"
+    }
+  },
+  "deliberate_contradictions": [
+    {
+      "fixture": "multi-track",
+      "transcript": "The panel is green.",
+      "visible_fact": "The matching generated visual is a blue field with a centered brighter blue rectangle."
+    }
+  ],
+  "expected_frame_selection": {
+    "ordinary_format": "jpeg",
+    "ordinary_max_width": 768,
+    "detail_max_width": 1024,
+    "batch_size": 8,
+    "scale_modes": {
+      "transcript": 0,
+      "efficient": 50,
+      "balanced": 100,
+      "token-burner_minimum": 251
+    }
+  }
+}
