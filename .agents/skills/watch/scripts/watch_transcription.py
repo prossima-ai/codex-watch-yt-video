@@ -25,6 +25,8 @@ from urllib.request import (
 
 
 ProviderName = Literal["openai", "groq"]
+OPENAI_MAX_AUDIO_CHUNK_BYTES = 19_000_000
+OPENAI_MAX_ENCODED_REQUEST_BYTES = 20_000_000
 TRANSCRIPTION_RELEASE_ENABLED = False
 TRANSCRIPTION_RELEASE_BLOCKER = (
     "Provider transcription is release-disabled until each selected provider has "
@@ -51,6 +53,7 @@ class ProviderDescriptor:
     destination: str
     privacy_url: str
     max_chunk_bytes: int
+    max_encoded_request_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,7 @@ class UrllibProviderTransport:
                 safe_detail="The selected provider destination is invalid.",
             )
         body, content_type = _multipart_request_body(descriptor, upload)
+        _validate_encoded_request_size(descriptor, body)
         request = Request(
             descriptor.destination,
             data=body,
@@ -224,7 +228,8 @@ class OpenAITranscriptionProvider:
         model="whisper-1",
         destination="https://api.openai.com/v1/audio/transcriptions",
         privacy_url="https://platform.openai.com/docs/models/default-usage-policies-by-endpoint",
-        max_chunk_bytes=24 * 1024 * 1024 - 1,
+        max_chunk_bytes=OPENAI_MAX_AUDIO_CHUNK_BYTES,
+        max_encoded_request_bytes=OPENAI_MAX_ENCODED_REQUEST_BYTES,
     )
 
     def __init__(
@@ -238,6 +243,8 @@ class OpenAITranscriptionProvider:
 
     def transcribe_chunk(self, upload: AudioChunkUpload) -> ProviderChunkResult:
         _validate_upload(upload, self.descriptor.max_chunk_bytes)
+        request_body, _ = _multipart_request_body(self.descriptor, upload)
+        _validate_encoded_request_size(self.descriptor, request_body)
         credential = self._credential_reader("OPENAI_API_KEY")
         if not isinstance(credential, str) or not credential:
             raise MissingProviderCredentialError(
@@ -341,6 +348,26 @@ def _multipart_request_body(
         )
     )
     return body, f"multipart/form-data; boundary={boundary}"
+
+
+def _validate_encoded_request_size(
+    descriptor: ProviderDescriptor, body: bytes
+) -> None:
+    max_encoded_request_bytes = descriptor.max_encoded_request_bytes
+    if (
+        not isinstance(max_encoded_request_bytes, int)
+        or isinstance(max_encoded_request_bytes, bool)
+        or max_encoded_request_bytes <= 0
+        or len(body) > max_encoded_request_bytes
+    ):
+        raise ProviderCallError(
+            category="size_format",
+            retryable=False,
+            safe_detail=(
+                "The selected provider request exceeds its verified complete "
+                "request-size limit."
+            ),
+        )
 
 
 def _classified_http_error(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import io
 import os
@@ -1295,6 +1296,172 @@ class ProviderTranscriptionTests(unittest.TestCase):
         self.assertIn(b"audio-only-canary", body)
         self.assertNotIn(self.source.encode(), body)
         self.assertNotIn(str(REPOSITORY_ROOT).encode(), body)
+
+    def test_openai_transport_rejects_complete_multipart_request_over_cap_before_http(self) -> None:
+        upload = AudioChunkUpload(
+            data=b"audio-only",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+        descriptor = replace(
+            OpenAITranscriptionProvider.descriptor,
+            max_encoded_request_bytes=1,
+        )
+        opener = FakeProviderOpener(
+            FakeHTTPResponse({"language": "en", "segments": []})
+        )
+
+        with self.assertRaises(ProviderCallError) as caught:
+            UrllibProviderTransport(opener=opener).send(
+                descriptor, "provider-secret", upload
+            )
+
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(opener.calls, [])
+
+    def test_openai_provider_rejects_request_over_complete_cap_before_credential_or_transport(self) -> None:
+        class LegacyAudioBudgetOpenAI(OpenAITranscriptionProvider):
+            descriptor = replace(
+                OpenAITranscriptionProvider.descriptor,
+                max_chunk_bytes=24 * 1024 * 1024 - 1,
+            )
+
+        requested_names: list[str] = []
+        transport = StaticProviderTransport()
+        provider = LegacyAudioBudgetOpenAI(
+            credential_reader=lambda name: requested_names.append(name) or "secret",
+            transport=transport,
+        )
+        upload = AudioChunkUpload(
+            data=b"a" * 20_000_000,
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+
+        with self.assertRaises(ProviderCallError) as caught:
+            provider.transcribe_chunk(upload)
+
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(requested_names, [])
+        self.assertEqual(transport.calls, [])
+
+    def test_openai_transport_enforces_exact_complete_multipart_boundary(self) -> None:
+        upload = AudioChunkUpload(
+            data=b"audio-only",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+        response = {"language": "en", "segments": []}
+        measured_opener = FakeProviderOpener(FakeHTTPResponse(response))
+        UrllibProviderTransport(opener=measured_opener).send(
+            OpenAITranscriptionProvider.descriptor, "provider-secret", upload
+        )
+        encoded_bytes = len(measured_opener.calls[0][0].data)
+
+        exact_opener = FakeProviderOpener(FakeHTTPResponse(response))
+        exact_descriptor = replace(
+            OpenAITranscriptionProvider.descriptor,
+            max_encoded_request_bytes=encoded_bytes,
+        )
+        UrllibProviderTransport(opener=exact_opener).send(
+            exact_descriptor, "provider-secret", upload
+        )
+
+        over_limit_opener = FakeProviderOpener(FakeHTTPResponse(response))
+        one_byte_over_descriptor = replace(
+            OpenAITranscriptionProvider.descriptor,
+            max_encoded_request_bytes=encoded_bytes - 1,
+        )
+        with self.assertRaises(ProviderCallError) as caught:
+            UrllibProviderTransport(opener=over_limit_opener).send(
+                one_byte_over_descriptor, "provider-secret", upload
+            )
+
+        self.assertEqual(len(exact_opener.calls), 1)
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(over_limit_opener.calls, [])
+
+    def test_openai_descriptor_reserves_audio_headroom_for_complete_request_overhead(self) -> None:
+        descriptor = OpenAITranscriptionProvider.descriptor
+
+        self.assertEqual(descriptor.max_encoded_request_bytes, 20_000_000)
+        self.assertLess(descriptor.max_chunk_bytes, descriptor.max_encoded_request_bytes)
+        upload = AudioChunkUpload(
+            data=b"a" * (descriptor.max_chunk_bytes - 1),
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+        opener = FakeProviderOpener(
+            FakeHTTPResponse({"language": "en", "segments": []})
+        )
+
+        UrllibProviderTransport(opener=opener).send(
+            descriptor, "provider-secret", upload
+        )
+
+        self.assertLessEqual(
+            len(opener.calls[0][0].data), descriptor.max_encoded_request_bytes
+        )
+
+    def test_openai_transport_counts_metadata_in_its_complete_request_cap(self) -> None:
+        upload = AudioChunkUpload(
+            data=b"a",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+        descriptor = replace(
+            OpenAITranscriptionProvider.descriptor,
+            model="whisper-1-" + "metadata" * 64,
+            max_encoded_request_bytes=600,
+        )
+        opener = FakeProviderOpener(
+            FakeHTTPResponse({"language": "en", "segments": []})
+        )
+
+        with self.assertRaises(ProviderCallError) as caught:
+            UrllibProviderTransport(opener=opener).send(
+                descriptor, "provider-secret", upload
+            )
+
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(opener.calls, [])
+
+    def test_transport_refuses_a_generic_audio_cap_without_a_complete_request_cap(self) -> None:
+        upload = AudioChunkUpload(
+            data=b"audio-only",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+            offset_seconds=0.0,
+            duration_seconds=1.0,
+        )
+        descriptor = ProviderDescriptor(
+            provider="openai",
+            model="whisper-1",
+            destination="https://api.openai.com/v1/audio/transcriptions",
+            privacy_url="https://example.com/privacy",
+            max_chunk_bytes=1024,
+        )
+        opener = FakeProviderOpener(
+            FakeHTTPResponse({"language": "en", "segments": []})
+        )
+
+        with self.assertRaises(ProviderCallError) as caught:
+            UrllibProviderTransport(opener=opener).send(
+                descriptor, "provider-secret", upload
+            )
+
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(opener.calls, [])
 
     def test_default_provider_transport_disables_environment_proxy_routing(self) -> None:
         hostile_proxy = "http://unapproved-proxy.example:8080"
