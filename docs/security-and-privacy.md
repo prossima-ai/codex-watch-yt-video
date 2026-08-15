@@ -41,36 +41,89 @@ can be recognized.
 and `tests/test_prepare_metadata.py::PrepareMetadataTests.test_public_url_stops_before_source_contact_without_host_approval`.
 
 For a supported public yt-dlp-compatible HTTP(S) URL, `yt-dlp` may contact the
-named source host only after separate command-network approval. Before optional
+named source host only after separate command-network approval. Before future
 transcription, it processes metadata, captions, frames, media, and audio locally.
-When `yt-dlp` returns a selected native-caption URL, the runtime directly retrieves the selected public HTTP(S) caption resource with Python `urllib` under that
-same approved source-network action. That resource can be a distinct public CDN
-host; the initial and redirected resource URLs are validated as public HTTP(S).
-Native captions and visual evidence remain local by default.
+When `yt-dlp` returns a selected native-caption URL, that untrusted internal
+value does not grant the direct caption request. Native captions and visual
+evidence remain local by default.
 A local file is not uploaded merely because it is selected for analysis.
 
-**Classification: implementation requirement. Evidence:** pinned
-`.agents/skills/watch/scripts/watch_evidence.py::UrlCaptionFetcher`, its
-`source_network_approved` gate, and
-`tests/test_caption_evidence.py::CaptionEvidenceTests.test_caption_retrieval_urls_remain_internal_to_the_runtime`.
+### Direct native-caption networking
+
+**Classification: implementation requirement. Evidence:** Decision #44, the
+[normative direct-caption contract](spec/watch-skill.md#direct-native-caption-retrieval),
+and hermetic implementation tests. This is not live source-host, DNS, redirect,
+caption, provider, or Desktop-approval evidence.
 
 The direct caption step means not every source contact goes through `yt-dlp`.
-The current runtime uses the same source-network-approval input for that step;
-it does not model a separate approval for the selected caption endpoint. This is
-hermetic implementation evidence only, not proof that Desktop will present,
-scope, or honor an approval in a live task.
+Decision #44 resolves the former release/spec gate by making the direct request a
+separate native-caption network action rather than a side effect of source-host
+approval. The runtime directly retrieves the selected public HTTPS caption
+resource only after that action's receipt is verified. Direct-caption retrieval
+is release-disabled pending hermetic coverage and one separately approved live
+public-caption validation run; this document makes no live approval, caption-fetch,
+or release claim.
 
-### Direct-caption approval discrepancy
+The approval prompt may disclose only the caption hostname, purpose, selected
+track, format, and byte cap. It returns an opaque, single-use receipt for an
+`approved`, `declined`, or `canceled` decision; the receipt is bound to one Watch
+request, source, runtime session, workspace, selected track, supported format,
+byte cap, and normalized HTTPS origin (hostname and port 443). It expires after
+five minutes or request end, whichever comes first, and denial, cancellation,
+failure, retry, use, or mismatch invalidates it. Invalid, malformed, tampered,
+replayed, mismatched, or expired receipts fail closed before DNS or HTTP work.
 
-**Classification: implementation requirement. Evidence:** the pinned runtime
-and approved [specification section 6.3](spec/watch-skill.md#63-preflight-acquisition-and-caption-policy).
+Caption URLs from `yt-dlp` are untrusted internal data. The runtime must not
+display, log, persist as evidence, or accept back as user input a raw signed
+caption URL or its query strings, credentials, tokens, or other sensitive URL
+material. They must not appear in any user-facing outcome, exception, diagnostic,
+snapshot, or log. Sanitized same-task audit data may identify only the hostname,
+purpose, selected track, format, byte cap, bounded byte count, redirect count,
+and typed outcome.
 
-The public contract cannot truthfully say that every source contact is through
-`yt-dlp` only. Resolving the direct selected-caption retrieval path is a
-release/spec gate: before release, an explicit decision must either route caption
-retrieval through `yt-dlp` or amend the approved policy and approval disclosure
-to name direct selected-caption endpoint retrieval. This documentation ticket
-makes no runtime change and provides no live approval or caption-fetch proof.
+Only public HTTPS endpoints are eligible. The URL policy rejects malformed URLs,
+non-HTTPS schemes, embedded credentials, IP literals, `localhost` and local
+aliases, nonstandard ports, loopback, private, link-local, multicast,
+unspecified, reserved, and other non-public targets. Every initial and redirect
+hostname resolution must yield only public IPv4 and IPv6 addresses; the network
+transport connects only to those checked answers so a hostname cannot bypass the
+public-address requirement.
+
+The direct request uses a sealed Python `urllib.request` HTTPS path rather than
+an ambient browser, global opener, proxy, cookie, redirect, or authentication
+configuration. It disables request-target debugging, uses only fixed caption
+headers, and dials the already checked numeric answer while retaining ordinary
+TLS hostname verification. This is an implementation requirement, not evidence
+that a caption request has been made.
+
+Redirects fail closed: there is a limit of three, loops and missing or malformed
+locations are rejected, and HTTPS-to-HTTP downgrades are rejected. URL, hostname,
+resolution, and public-address validation repeat at every hop. A redirect on the
+same approved origin can continue within the limit. A different otherwise-public
+origin returns a new `decision_required` action and receipt before any request to
+that origin; a non-public destination fails closed. The request must never forward
+sensitive authorization information to a redirect destination or expose redirect
+URLs in diagnostics.
+
+The caption byte cap is strict. An oversized `Content-Length` is rejected before
+the body is read, and actual streamed bytes are checked even if that header is
+absent, incorrect, or misleading. The exact cap is accepted only after an
+additional-byte check; the first byte beyond it aborts the fetch and never makes
+partial caption data successful. The chosen format must be one of the supported
+native formats; malformed/unavailable data does not become transcript evidence.
+
+The direct-caption outcome contract preserves the distinction between success
+(`ready`), denial (`stopped`), cancellation (`canceled`), unavailability
+(`partial`), parse/oversize/HTTP/transport/policy failure (`partial` or a typed
+terminal safety outcome), and a new-origin approval (`decision_required`). A
+direct-caption outcome does not fall back to transcription, audio extraction,
+provider credentials, or provider clients.
+
+For a normally reachable selected caption, failure (`partial`) means transcript
+coverage remains `none` and the safe typed category is retained; it never
+represents partially read bytes as usable caption evidence. An invalid receipt or
+other pre-request safety violation instead stops before the request with its
+typed terminal category.
 
 ## Telemetry boundary and independent parties
 
@@ -84,45 +137,56 @@ or a selected provider may process data under their own controls and disclosures
 This repository makes no claim that it controls, disables, or audits those
 independent systems.
 
-## Optional transcription, consent, and credentials
+## Transcription is release-disabled
 
-**Classification: implementation requirement. Evidence:** specification
-[section 8](spec/watch-skill.md#8-optional-transcription-consent-secrets-and-retries)
-and hermetic tests
-`tests/test_provider_transcription.py::ProviderTranscriptionTests.test_selected_audio_track_returns_provider_specific_consent_prompt`
-and
-`tests/test_provider_transcription.py::ProviderTranscriptionTests.test_source_approval_does_not_replace_provider_network_approval`.
+**Classification: implementation requirement. Evidence:** Decision #44,
+[specification section 8](spec/watch-skill.md#8-transcription-is-release-disabled),
+and hermetic disablement tests. No provider has been enabled, contacted, or
+live-validated for this work.
 
-Native captions are preferred. When captions are absent or unusable, the runtime
-first returns `decision_required` so the user can choose whether to transcribe
-and, if applicable, select a named provider and an audio track. It later returns
-`consent_required` before audio extraction. Provider selection, audio-track selection, fresh provider-specific audio-upload consent, and provider-network approval are distinct gates. No choice implies another: source-host approval is not provider-network approval, and an existing credential is neither provider selection nor consent. A declined/canceled consent or denied approval stops before extraction and upload, while preserving only truthful captions/frames evidence where available. Audio can contain sensitive information; read the consent disclosure before accepting it.
+Transcription is release-disabled. The release-facing public action surface does
+not offer `decision_required` transcription choices or `consent_required`
+audio-upload prompts, extract audio, read provider credentials, instantiate
+provider clients, or make provider requests. No direct-caption outcome may route
+into transcription: success, denial, cancellation, unavailability, parse error,
+oversize response, HTTP/transport failure, unsafe destination, and redirect
+failure remain caption outcomes. No automatic audio upload occurs.
 
-No automatic audio upload occurs: extraction and upload require the named provider,
-selected track, fresh consent, and separate provider-network approval for that
-same Watch request.
+Before a future provider can be considered, it must have a conservative
+provider-specific effective upload limit for the complete encoded request. That
+limit includes media bytes, multipart/form-data boundaries, per-part headers,
+field names, metadata, and all other request-body overhead; it is not merely
+nominal media-file size. A generic file-size cap or an audio-file measurement is
+not evidence that a provider request is safe. A human must then select exactly
+one provider, review a provider-specific validation plan, and grant separate
+explicit human approval immediately before that provider activity. Direct-caption
+approval and a future human release decision do not authorize it.
 
-**Classification: implementation requirement. Evidence:** specification
-[section 8.3](spec/watch-skill.md#83-upload-form-chunking-and-retries) and
-`tests/test_provider_transcription.py::ProviderTranscriptionTests.test_fresh_consent_uploads_only_selected_bounded_audio_to_selected_provider`.
+If those future gates close, native captions remain preferred. The task would
+first return `decision_required` for an explicit named provider and audio-track
+choice, then `consent_required` before audio extraction. Provider selection,
+audio-track selection, fresh provider-specific audio-upload consent, and
+provider-network approval are distinct gates. No choice implies another:
+source-host approval is not provider-network approval, and a credential is
+neither provider selection nor consent. A declined/canceled consent or denied
+approval stops before extraction and upload, preserving only truthful
+captions/frames evidence where available.
 
-Only bounded extracted audio chunks may be uploaded to the selected provider.
+Only bounded extracted audio chunks may be uploaded to a future selected
+provider, and only after its complete effective request-size limit is enforced.
 The adapter receives audio bytes for the selected track only; it never receives
 video bytes, video paths, workspace paths, unrelated tracks, or another
 provider's state. The runtime must not silently fall back to another provider.
 Partial provider results remain partial and name missing intervals rather than
 being represented as a complete transcript.
 
-**Classification: implementation requirement. Evidence:** specification
-[sections 8.1–8.2](spec/watch-skill.md#81-provider-selection-and-credentials) and
-`tests/test_provider_transcription.py::ProviderTranscriptionTests.test_selected_adapter_reads_only_its_credential_at_provider_call_time`.
-
-The only named environment credentials are `OPENAI_API_KEY` and `GROQ_API_KEY`;
-the selected adapter reads only its own value at provider-call time. The skill
-must never request secrets in chat, accept a secret as a control, scan `.env`,
-persist or log a credential, include one in a report, filename, URL, or command
-argument, probe an unselected provider, or silently fall back after a provider
-failure. No credential is read to decide which provider to present.
+The only named environment credentials are `OPENAI_API_KEY` and `GROQ_API_KEY`.
+After a future selected-provider gate has passed, an adapter may read only its
+own value at provider call time. The release-facing path reads neither value. The
+skill must never request secrets in chat, accept a secret as a control, scan
+`.env`, persist or log a credential, include one in a report, filename, URL, or
+command argument, probe an unselected provider, or silently fall back after a
+provider failure. No credential is read to decide which provider to present.
 
 ## Truthful outcomes and retained evidence
 
@@ -210,17 +274,23 @@ account-specific retention guarantee.
 
 **Classification: implementation requirement. Evidence:** pinned adapter
 configuration in `.agents/skills/watch/scripts/watch_transcription.py`, the
-official provider pages above, and [specification section 8.3](spec/watch-skill.md#83-upload-form-chunking-and-retries).
+official provider pages above, and [the future provider gate](spec/watch-skill.md#82-required-future-provider-gate).
 
-The current adapter ceiling is 25,165,823 bytes (`24 * 1024 * 1024 - 1`) before
+The historical adapter ceiling is 25,165,823 bytes (`24 * 1024 * 1024 - 1`) before
 multipart overhead. The current public documentation reports 25 MB for OpenAI and
-25 MB for the Groq free tier; a 25,000,000-byte limit is below the configured
-ceiling, and the implementation does not discover a provider account tier or
-effective limit. Therefore this documentation does not claim either provider is
-live-ready or that every accepted upload fits a current account limit. If a release
-cannot verify and honor a provider's required disclosure and effective limit,
-disable that provider for release; retain captions and visual evidence where
-available. This is a release gate, not a runtime change made by this ticket.
+25 MB for the Groq free tier; a 25,000,000-byte limit is below that ceiling, and
+the implementation does not discover a provider account tier or effective limit.
+More importantly, this is not merely nominal media-file size: any future limit
+must conservatively account for multipart/form-data boundaries, per-part headers,
+metadata, and all other request-body overhead. Therefore this documentation does
+not claim either provider is live-ready or that every accepted upload fits a
+current account limit. Transcription remains release-disabled. A human must first
+select one provider, approve a provider-specific validation plan, and grant
+separate explicit human approval immediately before any provider activity. If a
+release cannot verify and honor a provider's required disclosure and effective
+limit, disable that provider for release; retain captions and visual evidence where
+available. The provider-specific effective-limit work remains a future gate;
+this implementation enforces only the present release-facing disablement.
 
 ## Security reporting boundary
 

@@ -13,10 +13,78 @@ All material provenance claims use these labels:
   qualifyingly live-verified.
 - `unsupported/out of scope` — intentionally excluded v0.1 behavior.
 
-## Pinned implementation and specification record
+## Decision #44 implementation evidence record
 
-**Classification: confirmed. Evidence:** fresh canonical-main fetch on
-2026-08-14 and local `git rev-parse HEAD` in the dedicated Issue #29 worktree.
+**Classification: implementation requirement. Evidence:** the pinned
+`origin/main` base, Decision #44's approved contract, and local worktree
+inspection. This is a live-evidence and release-status record, not authorization
+for a caption request, provider request, deployment, publication, or release.
+
+| Record | Value | Boundary |
+| --- | --- | --- |
+| Governing decision | [Decision #44](https://github.com/prossima-ai/codex-watch-yt-video/issues/44) | It approves the fail-closed direct native-caption contract and release gates; it does not approve a live action. |
+| Pinned implementation base | `35a0c29bc9e264f533837adf40424aa95e55dcc1` | Canonical `origin/main` base for this implementation workflow and the squash commit from PR #45. |
+| Implementation commit | `af11d98c59c0b42046f70a277b63457719bedf14` | Intentional local-only implementation commit on `codex/issue-44-direct-native-captions`; no push, PR, issue comment, label, release, provider, or live-media action occurred. |
+| Documentation and code changes | `recorded` | Adds the sealed receipt/network/fetch seams and hermetic coverage; updates the normative specification, public safety/setup/readme/notices, domain vocabulary, and release gates. The implementation binds receipts; validates public HTTPS and DNS; pins numeric addresses; fails closed on redirects and response caps; redacts sensitive caption URLs; retains typed outcomes; and removes release-facing transcription providers. |
+| Focused and complete validation | `PASS` | Baseline before edits: `python3 -m unittest discover -s tests` — 192 tests, exit 0. Final focused caption suites: 51 tests, exit 0. Complete suite: `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` — 227 tests, exit 0. See exact commands below. |
+| Standards review | `PASS — no unresolved findings` | Independent complete-diff review against `AGENTS.md`, domain docs, architecture, safety, tests, documentation, and maintainability; every actionable finding below was resolved and re-reviewed. |
+| Spec review | `PASS — no unresolved findings` | Independent complete-diff review against Decision #44, this specification, the implementation request, and authorization/release gates; every actionable finding below was resolved and re-reviewed. |
+| Transcription disablement | `PASS — release surface disabled` | `prepare_metadata.py` and `prepare_visual.py` use `release_transcription_providers()`, which returns no providers; tests prove no release-facing transcription choice, credential read, provider client, or direct-caption fallback. The provider-effective-size gate remains unresolved. |
+| Live public-caption validation | `BLOCKED` | No separate explicit human approval has been granted for one named public-caption run. Hermetic tests cannot replace it. |
+| Provider validation | `BLOCKED` | No human has selected one provider, no conservative effective complete-request-size limit has been accepted, and no separate provider approval has been granted. |
+| Release gate status | `BLOCKED` | Missing controls/evidence are: one separately approved live public-caption run with adequate sanitized evidence; conservative provider-specific complete-request-size limits; selected-provider validation under separate approval; and an explicit human release decision. |
+| Human release decision | `PENDING` | No human decision has been requested or received. A human must review this evidence and explicitly record either `Approved for the specifically defined release scope` or `Blocked`, with exact missing evidence or controls. |
+
+No live caption retrieval, live caption validation, transcription, provider
+credential read, provider request, provider validation, deployment, publication,
+or release occurred while creating this record. A future live public-caption
+approval applies only to the named one run; a future provider approval is a
+separate gate and cannot be inferred from it.
+
+### Local validation commands and limits
+
+All listed commands ran in the isolated Decision #44 worktree on 2026-08-15 and
+exited `0`.
+
+- Baseline before edits: `python3 -m unittest discover -s tests` — **192 tests**.
+- Focused native-caption implementation: `python3 -B -m unittest tests.test_caption_network tests.test_caption_evidence -v` — **51 tests**.
+- Complete required repository suite: `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` — **227 tests**.
+- Syntax/static package inputs: `python3 -B -m compileall -q .agents/skills/watch/scripts tests`.
+- Whitespace/formatting guard: `git diff --check 35a0c29bc9e264f533837adf40424aa95e55dcc1`.
+- Skill package/discovery validation: `python3 /Users/ashishpratapsingh/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/watch` — `Skill is valid!`.
+
+Repository inspection found no project lint, formatter, type-check, package, or
+CI manifest beyond these standard-library tests and the repository-owned skill
+validator, so no absent tool was represented as having run. These are hermetic
+or static checks: they do not prove live DNS, public-host behavior, redirect
+behavior, media compatibility, Codex Desktop discovery, provider behavior, or a
+release.
+
+### Independent review findings and resolutions
+
+Both reviews inspected the full diff from the pinned base independently. The
+following findings were resolved with repository evidence before the final
+re-reviews reported no unresolved findings.
+
+- **Standards:** known receipts were not burned for malformed/mismatched follow-ups; the runtime now invalidates the known receipt before every rejected use and tests its replay refusal.
+- **Standards and Spec:** unsafe native-caption routes could be treated as no captions and offer transcription; the runtime now returns a sanitized caption-policy outcome that blocks every transcription/provider path, with a never-called provider fixture.
+- **Standards:** `CONTEXT.md` omitted the caption-network action/receipt and still described active transcription; the canonical vocabulary now names the action and release-disabled transcription.
+- **Standards:** dataclass representations could expose signed caption URLs; candidates, probes, and selections now retain sealed `CaptionResource` objects with a redacted representation, and snapshot/repr tests cover them.
+- **Standards:** redirect-failure audit records could falsely say zero redirects; the bounded fetch error now carries only a safe numeric count, including a runtime same-origin-loop regression.
+- **Standards:** a shorter-than-declared response could parse as a caption; final EOF must now equal a valid declared length, and a valid-but-truncated VTT fails as typed transport failure.
+- **Spec:** early receipt/control/workspace failures, direct-caption visual continuation, error-category distinctions, and receipt expiry/replay boundaries were incomplete; explicit lifecycle, typed-outcome, controllable-clock, and visual-resume tests now cover them.
+- **Spec:** response read/close failures and nonzero `yt-dlp` metadata diagnostics could render sensitive URL material; response lifecycle errors map to safe transport failures and nonzero `yt-dlp` output is classified but never rendered.
+- **Spec:** the original `http.client` response framing and inherited `urllib` opener path could miss delayed bytes or close before definitive EOF; the sealed `urllib.request` handler now issues only a fixed direct GET, retains the raw response for bounded EOF checks, rejects altered request shape, and never forwards caller credentials/cookies.
+- **Spec (final evidence review):** the record initially conflated a blocked release gate with a human release decision; it now records `Release gate status: BLOCKED` separately from `Human release decision: PENDING`, so no unauthorized decision is implied.
+
+Final Standards and Spec reviews each reported `PASS — no unresolved findings`.
+
+## Historical Issue #29 implementation and specification record
+
+**Classification: confirmed. Evidence:** historical fresh canonical-main fetch
+on 2026-08-14 and local `git rev-parse HEAD` in the dedicated Issue #29 worktree.
+This section is retained as the #29 record, not as the Decision #44 starting
+point; the Decision #44 table above is authoritative for this workflow.
 
 | Record | Value | Boundary |
 | --- | --- | --- |
@@ -96,16 +164,18 @@ the documented provider-size discrepancy.
 The remaining live/release gates are:
 
 - Desktop/package/authority checks on the target macOS Codex Desktop host;
-- a just-in-time approved public-media run for captions-first and visual evidence;
-- one selected-provider smoke with a disposable/restricted credential, fresh
-  provider-specific consent, provider-network approval, and redacted evidence;
-- a resolution of the 25,165,823-byte versus documented 25,000,000-byte limit
-  discrepancy before a provider is offered for a release; and
-- an explicit decision reconciling direct selected-caption retrieval with the
-  source-contact approval contract: route it through `yt-dlp` or amend the
-  approved policy and disclosure before release; and
+- one separately approved public-caption run for the Decision #44 direct action,
+  with sanitized host/redirect validation, bounded byte count, typed outcome, and
+  proof that transcription/provider code did not run;
+- a conservative provider-specific effective complete-request-size limit before
+  any provider is offered for a release. It must include multipart/form-data
+  boundaries, per-part headers, metadata, and all other request-body overhead,
+  not merely nominal media-file size; then a human-selected provider, a separate
+  validation plan, and separate explicit human approval immediately before that
+  provider activity; and
 - a release record that captures current provider documentation, source/tool
-  versions, live outcomes, approval records, and immutable release revision.
+  versions, live outcomes, approval records, independent reviews, and immutable
+  release revision, followed by an explicit human decision for the stated scope.
 
 An unavailable authorization, source, provider, or evidence record is `BLOCKED`
 or `UNVERIFIED`, never a pass. The unselected provider must not be marketed as
