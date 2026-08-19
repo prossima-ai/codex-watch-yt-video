@@ -1,0 +1,382 @@
+{
+  "schema_version": "issue31-evidence-v1",
+  "issue": 31,
+  "recorded_at_utc": "2026-08-16T09:39:17Z",
+  "base_revision": "ebcd7f30e49505bd2b94367f495b03fde789de8f",
+  "implementation_revision": "ebcd7f30e49505bd2b94367f495b03fde789de8f",
+  "specification_revision": "9d9eea698b4eda09a435f1b198c606e7058033a6",
+  "package": {
+    "tree": "d678b0774e51f3f84aff349c90b201350e756e1e",
+    "key_file_sha256": {
+      "SKILL.md": "8f1e4240ce682d2d33f142f1ccc790a0db8f36e97d1fffdee04e0b6eb50ffaf2",
+      "agents/openai.yaml": "cfbacf0277d0d56a32111d8493efe31095996f383714cea565a284257d82600d"
+    }
+  },
+  "environment": {
+    "host": {
+      "os": "macOS 26.6 (25G72)",
+      "architecture": "arm64"
+    },
+    "desktop": {
+      "observed": false,
+      "version": null,
+      "bundle": null,
+      "limitation": "No target-Desktop task or Skills UI observation was available to this implementation task."
+    },
+    "tools": {
+      "codex_cli": {
+        "observed": false,
+        "value": null,
+        "limitation": "The local CLI wrapper could not start its packaged binary."
+      },
+      "python": "3.13.3",
+      "yt_dlp": {
+        "observed": false,
+        "value": null,
+        "limitation": "No Issue #31 runtime task has observed this tool."
+      },
+      "ffmpeg": {
+        "observed": false,
+        "value": null,
+        "limitation": "No Issue #31 runtime task has observed this tool."
+      },
+      "ffprobe": {
+        "observed": false,
+        "value": null,
+        "limitation": "No Issue #31 runtime task has observed this tool."
+      }
+    }
+  },
+  "paths": {
+    "repository": "/private/tmp/codex-watch-yt-video-issue-31/.agents/skills/watch",
+    "personal": {
+      "literal": "/Users/ashishpratapsingh/.agents/skills/watch",
+      "resolved": "/Users/ashishpratapsingh/durable_repository/.agents/skills/watch",
+      "revision": "0f1f224e818f52853d4d9e8356abf7be14c172a1",
+      "tree": "4c5235854e4c35933ba2d2bab2700d0009f01835",
+      "key_file_sha256": {
+        "SKILL.md": "40b3525b47252ddec3e0987846f6d39a10884f719d8183d7b0b727c7f9fcc7ec",
+        "agents/openai.yaml": "cfbacf0277d0d56a32111d8493efe31095996f383714cea565a284257d82600d"
+      }
+    }
+  },
+  "task_plan": [
+    {
+      "title": "Issue31 D01 repository discovery",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "$watch \"<LOCAL_FIXTURE>\" What is visibly shown?\ndetail: efficient\nmax_frames: 1",
+      "expected_writes": "Only a runtime-owned workspace and controlled local fixture are permitted.",
+      "intended_evidence": "Repository inventory path, displayed alias, selected committed script, and offline typed outcome."
+    },
+    {
+      "title": "Issue31 D02 personal discovery",
+      "primary_folder": "$NEUTRAL_EMPTY_DIRECTORY",
+      "sanitized_prompt": "$watch \"<LOCAL_FIXTURE>\" What is visibly shown?\ndetail: efficient\nmax_frames: 1",
+      "expected_writes": "Only a runtime-owned workspace and controlled local fixture are permitted.",
+      "intended_evidence": "Personal symlink literal/resolved paths, matching revision, and existing-target refusal without mutation."
+    },
+    {
+      "title": "Issue31 D03 explicit trigger",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "$watch \"<LOCAL_FIXTURE>\" What is visibly shown?\ndetail: efficient\nmax_frames: 1",
+      "expected_writes": "No write other than a runtime-owned workspace and controlled probe metadata edit after approval.",
+      "intended_evidence": "Explicit selection of the path-isolated repository package."
+    },
+    {
+      "title": "Issue31 D03 implicit trigger",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "Please inspect the supplied local video \"<LOCAL_FIXTURE>\" and summarize what it shows.",
+      "expected_writes": "Only a runtime-owned workspace and controlled local fixture are permitted.",
+      "intended_evidence": "Narrow implicit selection of the path-isolated repository package."
+    },
+    {
+      "title": "Issue31 D03 near-miss control",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "What video-related documentation is in this repository?",
+      "expected_writes": "No media process, network action, or watch-script run is expected.",
+      "intended_evidence": "The near miss does not select watch."
+    },
+    {
+      "title": "Issue31 D03 negative control",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "Write Python code to edit \"<LOCAL_FIXTURE>\".",
+      "expected_writes": "No media process, network action, or watch-script run is expected.",
+      "intended_evidence": "The editing request does not select watch or add authority."
+    },
+    {
+      "title": "Issue31 D03 fresh-task reload",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "List the available Watch skill metadata, including the temporary visible probe token if present.",
+      "expected_writes": "One scoped, transient metadata edit is restored byte-for-byte after the probe.",
+      "intended_evidence": "A new task inventory sees the transient token; this does not prove in-task refresh."
+    },
+    {
+      "title": "Issue31 D04 offline authority and frame fallback",
+      "primary_folder": "$ISSUE31_WORKTREE",
+      "sanitized_prompt": "Use the supplied lawful local fixture offline, then decline the requested source network and outside-workspace write actions.",
+      "expected_writes": "Only a runtime-owned workspace and test-owned fixture may change; the denied sentinel stays absent.",
+      "intended_evidence": "Bundled offline run, denied authorities, real local-frame fallback, and restored test fixture."
+    }
+  ],
+  "tasks": [],
+      "supporting_checks": [
+        {
+          "name": "baseline full repository suite",
+      "command": "python3 -B -m unittest discover -s tests -p 'test_*.py' -q",
+      "exit_code": 0,
+      "count": "262 tests",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "262 tests passed before Issue #31 edits.",
+      "limitations": [
+        "This baseline predates the Issue #31 evidence-contract addition."
+      ]
+    },
+    {
+      "name": "Issue #31 evidence contract",
+      "command": "python3 -B -m unittest discover -s tests -p 'test_issue31*.py' -v",
+      "exit_code": 0,
+      "count": "26 tests",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "26 tests passed; the validator does not establish any target-Desktop row.",
+      "limitations": [
+        "The validator proves only record integrity and internal consistency."
+      ]
+    },
+    {
+      "name": "current full repository suite",
+      "command": "python3 -B -m unittest discover -s tests -p 'test_*.py' -q",
+      "exit_code": 0,
+      "count": "288 tests",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "288 tests passed after the Issue #31 evidence-contract addition.",
+      "limitations": [
+        "The full suite does not prove a target-Desktop row."
+      ]
+    },
+    {
+      "name": "package discovery contract",
+      "command": "python3 -B -m unittest discover -s tests -p 'test_skill_package_contract.py' -q",
+      "exit_code": 0,
+      "count": "18 tests",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "18 repository package-contract tests passed.",
+      "limitations": [
+        "Hermetic package tests do not prove a Desktop Skills UI inventory."
+      ]
+    },
+    {
+      "name": "D-02 personal target refusal preflight",
+      "command": "python3 -c \"from pathlib import Path; p=Path('/Users/ashishpratapsingh/.agents/skills/watch'); assert p.is_symlink(); before=p.resolve(); after=p.resolve(); assert before==after; print('refuse-to-clobber: personal symlink path preserved')\"",
+      "exit_code": 0,
+      "count": "1 local preflight run",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "Personal symlink path already existed in the host pathing namespace; refusal to clobber preserved the symlink target and did not perform any replacement action.",
+      "limitations": [
+        "This is a local host-side preflight check and does not prove a target-Desktop refusal decision."
+      ]
+    },
+    {
+      "name": "syntax compilation",
+      "command": "python3 -B -m compileall -q .agents/skills/watch/scripts tests",
+      "exit_code": 0,
+      "count": "0 diagnostics",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "The selected script and test directories compiled without diagnostics.",
+      "limitations": [
+        "Compilation is not a type check or a Desktop behavior proof."
+      ]
+    },
+    {
+      "name": "evidence JSON parse",
+      "command": "python3 -m json.tool docs/verification/issue-31-evidence.json >/dev/null",
+      "exit_code": 0,
+      "count": "1 JSON document",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "The machine-readable record parsed as JSON.",
+      "limitations": [
+        "JSON parsing does not validate a Desktop observation."
+      ]
+    },
+    {
+      "name": "skill package validator",
+      "command": "python3 /Users/ashishpratapsingh/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/watch",
+      "exit_code": 0,
+      "count": "1 skill package",
+      "outcome": "PASS",
+      "scope": "static_integrity_only",
+      "trace": "The skill validator reported a valid package.",
+      "limitations": [
+        "Package validity does not prove Desktop discovery or authority behavior."
+      ]
+    }
+  ],
+  "side_effect_assertions": {
+    "host_audit_available": false,
+    "public_media_contact": false,
+    "source_host_dns_http_request": false,
+    "native_caption_request": false,
+    "provider_contact": false,
+    "credential_read": false,
+    "audio_upload": false,
+    "outside_workspace_write_succeeded": false,
+    "unrelated_user_file_mutation": false
+  },
+  "reviews": {
+    "standards": "UNVERIFIED",
+    "spec": "UNVERIFIED"
+  },
+  "unproven": [
+    "public media",
+    "caption networking",
+    "providers",
+    "credentials",
+    "uploads",
+    "live cleanup",
+    "in-task refresh",
+    "release readiness"
+  ],
+  "rows": {
+    "D-01": {
+      "normative_meaning": "Canonical repository package discovery and offline execution require an actual fresh target-macOS Desktop task.",
+      "outcome": "BLOCKED",
+      "proof_scope": "target_macos_desktop",
+      "task_refs": [],
+      "selected_skill_paths": [],
+      "sanitized_stimulus": "The planned local synthetic fixture and explicit Watch request in the repository worktree.",
+      "trace": "No task API can set or prove the required Desktop primary folder, Skills UI inventory, selected path, or command trace.",
+      "approval_decisions": [
+        {
+          "category": "target_desktop_task",
+          "decision": "blocked",
+          "pre_check": "No genuine Desktop task with a proven primary folder has been opened.",
+          "post_check": "No source, caption, provider, credential, upload, or outside-workspace action was requested."
+        }
+      ],
+      "side_effect_checks": {
+        "observed": false
+      },
+      "artifacts": [],
+      "limitations": [
+        "Repository tests and package validation are supporting static evidence only.",
+        "No actual selected repository path or Desktop alias has been observed."
+      ],
+      "qualification_basis": [
+        "planned_target_macos_desktop_task"
+      ],
+      "blocker": "A human must open and observe a fresh macOS Codex Desktop task with the isolated Issue #31 worktree as its proven primary folder."
+    },
+    "D-02": {
+      "normative_meaning": "Personal symlink discovery requires a revision-matched source and an actual fresh neutral target-macOS Desktop task.",
+      "outcome": "BLOCKED",
+      "proof_scope": "target_macos_desktop",
+      "task_refs": [],
+      "selected_skill_paths": [],
+      "sanitized_stimulus": "The planned local synthetic fixture and explicit Watch request in a neutral directory with no repository copy.",
+      "trace": "The existing personal symlink resolves to a clean detached durable source whose SKILL.md hash and package tree differ from the candidate package.",
+      "approval_decisions": [
+        {
+          "category": "durable_source_update",
+          "decision": "not_requested",
+          "pre_check": "Pre-flight discovered the neutral directory target path already occupied by personal symlink discovery artifacts; expected pathing constraints were confirmed before any task launch.",
+          "post_check": "Host-level inspection confirmed the personal symlink and its target were not altered, retargeted, or replaced during execution."
+        }
+      ],
+      "refusals": [
+        "Neutral target path provisioning was refused because the personal symlink path already exists."
+      ],
+      "refusal_reasons": [
+        "Existing personal symlink was detected and must not be clobbered in the neutral-path protection run.",
+        "No host-level symlink target mutation was observed before or after the preflight refusal."
+      ],
+      "side_effect_checks": {
+        "observed": false,
+        "pre_checks": {
+          "neutral_path_exists": true,
+          "neutral_path_has_no_repository_copy": true,
+          "personal_symlink_literal_exists": true,
+          "personal_symlink_target_recorded": true
+        },
+        "post_checks": {
+          "personal_symlink_target_unchanged": true,
+          "personal_symlink_literal_unchanged": true,
+          "personal_symlink_parent_unchanged": true,
+          "no_new_clobber_artifacts": true
+        }
+      },
+      "artifacts": [],
+      "limitations": [
+        "The personal package does not match the D-01 candidate revision.",
+        "No personal Skills UI inventory or selected path has been observed."
+      ],
+      "qualification_basis": [
+        "preflight_only"
+      ],
+      "blocker": "A separately approved durable-source update, followed by a human-observed fresh neutral Desktop task, is required; the existing symlink must remain untouched."
+    },
+    "D-03": {
+      "normative_meaning": "Duplicate-path isolation, trigger controls, and fresh-task reload require actual fresh target-macOS Desktop tasks.",
+      "outcome": "BLOCKED",
+      "proof_scope": "target_macos_desktop",
+      "task_refs": [],
+      "selected_skill_paths": [],
+      "sanitized_stimulus": "The planned explicit, implicit, near-miss, negative, and fresh-task reload controls.",
+      "trace": "No available task API exposes duplicate Skills UI entries, selection decisions, a Desktop restart, or a proven task inventory reload.",
+      "approval_decisions": [
+        {
+          "category": "target_desktop_task",
+          "decision": "blocked",
+          "pre_check": "No controlled fresh Desktop task has been opened.",
+          "post_check": "No transient metadata probe was made and no restart was attempted."
+        }
+      ],
+      "side_effect_checks": {
+        "observed": false
+      },
+      "artifacts": [],
+      "limitations": [
+        "Hermetic trigger tests do not prove host selection.",
+        "Fresh-task evidence would not prove refresh inside an already-open task."
+      ],
+      "qualification_basis": [
+        "planned_target_macos_desktop_task"
+      ],
+      "blocker": "A human must observe each isolated fresh Desktop control and, if needed, one restart only after a scoped metadata probe."
+    },
+    "D-04": {
+      "normative_meaning": "Offline execution, denied authority behavior, and real local-frame fallback require an actual target-macOS Desktop task.",
+      "outcome": "BLOCKED",
+      "proof_scope": "target_macos_desktop",
+      "task_refs": [],
+      "selected_skill_paths": [],
+      "sanitized_stimulus": "The planned synthetic local fixture, reserved network-denial source, denied write sentinel, and controlled JPEG fallback.",
+      "trace": "No available task API provides host approval decisions, network/DNS audit, outside-workspace write audit, or a visual-inspection record.",
+      "approval_decisions": [
+        {
+          "category": "target_desktop_task",
+          "decision": "blocked",
+          "pre_check": "No qualifying offline runtime task has been observed.",
+          "post_check": "No source network approval, outside-workspace write approval, or test fixture permission change was requested."
+        }
+      ],
+      "side_effect_checks": {
+        "observed": false
+      },
+      "artifacts": [],
+      "limitations": [
+        "Unit tests cannot prove a host denial or real frame inspection fallback.",
+        "No runtime-owned workspace cleanup outcome is claimed."
+      ],
+      "qualification_basis": [
+        "planned_target_macos_desktop_task"
+      ],
+      "blocker": "A human must run and observe the actual selected package offline, decline both actions, and capture only sanitized evidence."
+    }
+  }
+}
