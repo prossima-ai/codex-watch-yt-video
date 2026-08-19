@@ -12,6 +12,7 @@ import secrets
 import socket
 import ssl
 import time
+from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -58,13 +59,31 @@ class ProviderDescriptor:
 
 @dataclass(frozen=True)
 class AudioChunkUpload:
-    """Bounded audio-only provider input with no source or workspace path."""
+    """Legacy adapter fixture shape retained for isolated adapter tests."""
 
     data: bytes
     filename: str
     content_type: Literal["audio/mpeg"]
     offset_seconds: float
     duration_seconds: float
+
+
+@dataclass(frozen=True)
+class PreparedAudioUpload:
+    """The only audio facts the Watch runtime may pass to batch transcription."""
+
+    data: bytes
+    filename: str
+    content_type: Literal["audio/mpeg"]
+
+
+@dataclass(frozen=True)
+class ProviderAudioUpload:
+    """The deliberately timing-free object supplied to a provider adapter."""
+
+    data: bytes
+    filename: str
+    content_type: Literal["audio/mpeg"]
 
 
 @dataclass(frozen=True)
@@ -83,7 +102,82 @@ class ProviderChunkResult:
 class TranscriptionProvider(Protocol):
     descriptor: ProviderDescriptor
 
-    def transcribe_chunk(self, upload: AudioChunkUpload) -> ProviderChunkResult: ...
+    def transcribe_chunk(self, upload: ProviderAudioUpload) -> ProviderChunkResult: ...
+
+
+@dataclass(frozen=True)
+class BatchTranscriptionSuccess:
+    result: ProviderChunkResult
+
+
+@dataclass(frozen=True)
+class BatchTranscriptionFailure:
+    category: ProviderFailureCategory
+    retryable: bool
+    safe_detail: str
+    retry_after_seconds: float | None = None
+
+
+BatchTranscriptionResult = BatchTranscriptionSuccess | BatchTranscriptionFailure
+
+
+class BatchTranscriptionModule:
+    """Provider-neutral boundary for one already-prepared audio upload.
+
+    It deliberately owns neither source timing, selection, consent, retries,
+    coverage, nor user-facing reporting.  Those remain Watch runtime authority.
+    """
+
+    def __init__(self, adapter: TranscriptionProvider) -> None:
+        descriptor = getattr(adapter, "descriptor", None)
+        if not isinstance(descriptor, ProviderDescriptor):
+            raise ValueError("Batch transcription adapters require an immutable route.")
+        self._adapter = adapter
+        self._descriptor = descriptor
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def transcribe(self, prepared: PreparedAudioUpload) -> BatchTranscriptionResult:
+        try:
+            _validate_prepared_upload(prepared, self._descriptor.max_chunk_bytes)
+            result = self._adapter.transcribe_chunk(
+                ProviderAudioUpload(
+                    data=prepared.data,
+                    filename=prepared.filename,
+                    content_type=prepared.content_type,
+                )
+            )
+            _validate_provider_chunk_result(result)
+        except ProviderCallError as error:
+            return BatchTranscriptionFailure(
+                category=error.category,
+                retryable=error.retryable,
+                safe_detail=_normalized_failure_detail(error.category),
+                retry_after_seconds=error.retry_after_seconds
+                if error.retryable
+                else None,
+            )
+        except MissingProviderCredentialError:
+            return BatchTranscriptionFailure(
+                category="authentication",
+                retryable=False,
+                safe_detail=_normalized_failure_detail("authentication"),
+            )
+        except (OSError, TimeoutError):
+            return BatchTranscriptionFailure(
+                category="permanent",
+                retryable=False,
+                safe_detail=_normalized_failure_detail("permanent"),
+            )
+        except Exception:
+            return BatchTranscriptionFailure(
+                category="permanent",
+                retryable=False,
+                safe_detail=_normalized_failure_detail("permanent"),
+            )
+        return BatchTranscriptionSuccess(result)
 
 
 class ProviderTransport(Protocol):
@@ -91,7 +185,7 @@ class ProviderTransport(Protocol):
         self,
         descriptor: ProviderDescriptor,
         credential: str,
-        upload: AudioChunkUpload,
+        upload: ProviderAudioUpload,
     ) -> object: ...
 
 
@@ -163,7 +257,7 @@ class UrllibProviderTransport:
         self,
         descriptor: ProviderDescriptor,
         credential: str,
-        upload: AudioChunkUpload,
+        upload: ProviderAudioUpload,
     ) -> object:
         _validate_upload(upload, descriptor.max_chunk_bytes)
         parsed_destination = urlsplit(descriptor.destination)
@@ -241,7 +335,7 @@ class OpenAITranscriptionProvider:
         self._credential_reader = credential_reader
         self._transport = transport
 
-    def transcribe_chunk(self, upload: AudioChunkUpload) -> ProviderChunkResult:
+    def transcribe_chunk(self, upload: ProviderAudioUpload) -> ProviderChunkResult:
         _validate_upload(upload, self.descriptor.max_chunk_bytes)
         request_body, _ = _multipart_request_body(self.descriptor, upload)
         _validate_encoded_request_size(self.descriptor, request_body)
@@ -272,7 +366,7 @@ class GroqTranscriptionProvider:
         self._credential_reader = credential_reader
         self._transport = transport
 
-    def transcribe_chunk(self, upload: AudioChunkUpload) -> ProviderChunkResult:
+    def transcribe_chunk(self, upload: ProviderAudioUpload) -> ProviderChunkResult:
         _validate_upload(upload, self.descriptor.max_chunk_bytes)
         credential = self._credential_reader("GROQ_API_KEY")
         if not isinstance(credential, str) or not credential:
@@ -283,10 +377,12 @@ class GroqTranscriptionProvider:
         return _parse_provider_result(response)
 
 
-def default_transcription_providers() -> dict[ProviderName, TranscriptionProvider]:
-    """Build isolated adapters without reading credentials or contacting providers."""
+def development_transcription_registry() -> Mapping[
+    ProviderName, TranscriptionProvider
+]:
+    """Build test/development adapters without reading credentials or contacting providers."""
 
-    return {
+    return MappingProxyType({
         "openai": OpenAITranscriptionProvider(
             credential_reader=_environment_credential_reader,
             transport=UrllibProviderTransport(),
@@ -295,13 +391,25 @@ def default_transcription_providers() -> dict[ProviderName, TranscriptionProvide
             credential_reader=_environment_credential_reader,
             transport=UrllibProviderTransport(),
         ),
-    }
+    })
 
 
-def release_transcription_providers() -> dict[ProviderName, TranscriptionProvider]:
+def default_transcription_providers() -> Mapping[ProviderName, TranscriptionProvider]:
+    """Compatibility name for the isolated development/test registry."""
+
+    return development_transcription_registry()
+
+
+def release_transcription_registry() -> Mapping[ProviderName, TranscriptionProvider]:
     """Keep every release-facing action free of provider clients until the gate closes."""
 
-    return {}
+    return MappingProxyType({})
+
+
+def release_transcription_providers() -> Mapping[ProviderName, TranscriptionProvider]:
+    """Compatibility name for the intentionally empty release registry."""
+
+    return release_transcription_registry()
 
 
 def _environment_credential_reader(name: str) -> str | None:
@@ -311,7 +419,7 @@ def _environment_credential_reader(name: str) -> str | None:
 
 
 def _multipart_request_body(
-    descriptor: ProviderDescriptor, upload: AudioChunkUpload
+    descriptor: ProviderDescriptor, upload: ProviderAudioUpload | AudioChunkUpload
 ) -> tuple[bytes, str]:
     boundary = "codex-watch-" + secrets.token_hex(16)
     while boundary.encode("ascii") in upload.data:
@@ -509,7 +617,10 @@ def _retry_after_seconds(
     return min(seconds, 60.0)
 
 
-def _validate_upload(upload: AudioChunkUpload, max_chunk_bytes: int) -> None:
+def _validate_prepared_upload(
+    upload: PreparedAudioUpload | ProviderAudioUpload | AudioChunkUpload,
+    max_chunk_bytes: int,
+) -> None:
     filename_match = (
         re.fullmatch(
             r"audio-chunk-([0-9]{4}|10000)\.mp3",
@@ -529,7 +640,16 @@ def _validate_upload(upload: AudioChunkUpload, max_chunk_bytes: int) -> None:
         or isinstance(max_chunk_bytes, bool)
         or max_chunk_bytes <= 1
         or len(upload.data) >= max_chunk_bytes
-        or not isinstance(upload.offset_seconds, (int, float))
+    ):
+        raise ValueError("The provider input is not one bounded audio-only chunk.")
+
+
+def _validate_upload(
+    upload: ProviderAudioUpload | AudioChunkUpload, max_chunk_bytes: int
+) -> None:
+    _validate_prepared_upload(upload, max_chunk_bytes)
+    if isinstance(upload, AudioChunkUpload) and (
+        not isinstance(upload.offset_seconds, (int, float))
         or isinstance(upload.offset_seconds, bool)
         or not math.isfinite(upload.offset_seconds)
         or upload.offset_seconds < 0
@@ -539,6 +659,38 @@ def _validate_upload(upload: AudioChunkUpload, max_chunk_bytes: int) -> None:
         or upload.duration_seconds <= 0
     ):
         raise ValueError("The provider input is not one bounded audio-only chunk.")
+
+
+def _validate_provider_chunk_result(result: object) -> None:
+    if not isinstance(result, ProviderChunkResult):
+        raise ValueError("The provider returned an invalid transcription object.")
+    if result.language is not None and not isinstance(result.language, str):
+        raise ValueError("The provider returned an invalid transcription object.")
+    for segment in result.segments:
+        if (
+            not isinstance(segment, ProviderSegment)
+            or not isinstance(segment.text, str)
+            or not isinstance(segment.start_seconds, (int, float))
+            or isinstance(segment.start_seconds, bool)
+            or not math.isfinite(segment.start_seconds)
+            or not isinstance(segment.end_seconds, (int, float))
+            or isinstance(segment.end_seconds, bool)
+            or not math.isfinite(segment.end_seconds)
+        ):
+            raise ValueError("The provider returned an invalid transcription object.")
+
+
+def _normalized_failure_detail(category: ProviderFailureCategory) -> str:
+    return {
+        "transient_network": "The selected provider request failed transiently.",
+        "rate_limit": "The selected provider rate-limited the request.",
+        "server_error": "The selected provider reported a transient server error.",
+        "authentication": "The selected provider credential or authorization is unavailable.",
+        "invalid_input": "The selected provider rejected the prepared audio input.",
+        "size_format": "The prepared audio exceeded the selected provider safety limit.",
+        "billing_quota": "The selected provider reported a billing or quota limit.",
+        "permanent": "The selected provider request failed permanently.",
+    }[category]
 
 
 def _parse_provider_result(value: object) -> ProviderChunkResult:
