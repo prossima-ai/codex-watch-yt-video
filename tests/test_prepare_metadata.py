@@ -24,6 +24,7 @@ from watch_evidence import WatchEvidenceRuntime  # noqa: E402
 from watch_transcription import (  # noqa: E402
     TRANSCRIPTION_RELEASE_BLOCKER,
     TRANSCRIPTION_RELEASE_ENABLED,
+    development_transcription_registry,
     release_transcription_providers,
 )
 
@@ -515,8 +516,9 @@ else:
                     "automatic_captions": {},
                 },
             )
-            environment.pop("OPENAI_API_KEY", None)
-            environment.pop("GROQ_API_KEY", None)
+            development_registry = development_transcription_registry()
+            environment["OPENAI_API_KEY"] = "release-openai-credential-canary"
+            environment["GROQ_API_KEY"] = "release-groq-credential-canary"
             session = self.start_session(env=environment)
             try:
                 outcome = self.run_session_request(
@@ -534,6 +536,7 @@ else:
         self.assertEqual(outcome["state"], "partial")
         self.assertIsNone(outcome["choice_kind"])
         self.assertEqual(outcome["choices"], [])
+        self.assertEqual(tuple(development_registry), ("openai", "groq"))
         self.assertFalse(any("--format" in arguments for arguments in invocations))
         self.assertNotIn(
             "default_transcription_providers", PREPARE_METADATA.read_text(encoding="utf-8")

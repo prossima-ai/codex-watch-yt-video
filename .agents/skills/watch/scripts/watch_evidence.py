@@ -37,8 +37,10 @@ from watch_caption_network import (
     caption_resource,
 )
 from watch_transcription import (
-    AudioChunkUpload,
-    MissingProviderCredentialError,
+    BatchTranscriptionFailure,
+    BatchTranscriptionModule,
+    BatchTranscriptionSuccess,
+    PreparedAudioUpload,
     ProviderCallError,
     ProviderChunkResult,
     TranscriptionProvider,
@@ -808,7 +810,10 @@ class WatchEvidenceRuntime:
         self._artifact_root = artifact_root
         self._visual_enabled = visual_enabled
         self._reuse_enabled = reuse_enabled
-        self._transcription_providers = dict(transcription_providers or {})
+        self._batch_transcription_modules = {
+            name: BatchTranscriptionModule(provider)
+            for name, provider in (transcription_providers or {}).items()
+        }
         self._retry_sleeper = retry_sleeper
         self._retry_jitter = retry_jitter or _default_retry_jitter
         self._cancellation_requested = cancellation_requested or (lambda: False)
@@ -2401,7 +2406,7 @@ class WatchEvidenceRuntime:
             if (
                 provider_choice.provider is None
                 or provider_choice.model is None
-                or provider_choice.provider not in self._transcription_providers
+                or provider_choice.provider not in self._batch_transcription_modules
             ):
                 return self._failure_outcome(
                     state="stopped",
@@ -2963,13 +2968,13 @@ class WatchEvidenceRuntime:
             not outcome.terminal
             or outcome.evidence is None
             or outcome.evidence.transcript is not None
-            or not self._transcription_providers
+            or not self._batch_transcription_modules
         ):
             return outcome
         provider_order = {"openai": 0, "groq": 1}
         provider_items = tuple(
             sorted(
-                self._transcription_providers.items(),
+                self._batch_transcription_modules.items(),
                 key=lambda item: provider_order.get(item[0], len(provider_order)),
             )
         )
@@ -3169,7 +3174,7 @@ class WatchEvidenceRuntime:
         audio_selection: _AudioSelection,
         workspace: _WorkspaceRecord,
     ) -> EvidenceOutcome:
-        provider = self._transcription_providers.get(
+        provider = self._batch_transcription_modules.get(
             audio_selection.provider_choice.provider or ""
         )
         if provider is None:
@@ -3454,7 +3459,7 @@ class WatchEvidenceRuntime:
         ffprobe = executable_paths.get("ffprobe")
         provider_name = selection.provider_choice.provider
         provider = (
-            self._transcription_providers.get(provider_name)
+            self._batch_transcription_modules.get(provider_name)
             if provider_name is not None
             else None
         )
@@ -3641,12 +3646,10 @@ class WatchEvidenceRuntime:
         available_ranges: list[TimeRange] = []
         transcript_language = selection.audio_choice.language or "unknown"
         for prepared_chunk in prepared_chunks:
-            upload = AudioChunkUpload(
+            upload = PreparedAudioUpload(
                 data=prepared_chunk.data,
                 filename=f"audio-chunk-{prepared_chunk.index:04d}.mp3",
                 content_type="audio/mpeg",
-                offset_seconds=prepared_chunk.offset_seconds,
-                duration_seconds=prepared_chunk.duration_seconds,
             )
             result, provider_error, attempts, canceled = self._call_provider_with_retries(
                 provider, upload
@@ -3977,7 +3980,7 @@ class WatchEvidenceRuntime:
         controls: WatchControls,
         selection: _ConsentSelection,
         workspace: _WorkspaceRecord,
-        provider: TranscriptionProvider,
+        provider: BatchTranscriptionModule,
         language: str,
         segments: tuple[TranscriptSegment, ...],
         available_ranges: tuple[TimeRange, ...],
@@ -4069,8 +4072,8 @@ class WatchEvidenceRuntime:
 
     def _call_provider_with_retries(
         self,
-        provider: TranscriptionProvider,
-        upload: AudioChunkUpload,
+        provider: BatchTranscriptionModule,
+        upload: PreparedAudioUpload,
     ) -> tuple[
         ProviderChunkResult | None,
         ProviderCallError | None,
@@ -4083,8 +4086,25 @@ class WatchEvidenceRuntime:
                 return None, None, attempts, True
             attempts += 1
             try:
-                result = provider.transcribe_chunk(upload)
-            except ProviderCallError as error:
+                module_result = provider.transcribe(upload)
+            except Exception:
+                return (
+                    None,
+                    ProviderCallError(
+                        category="permanent",
+                        retryable=False,
+                        safe_detail="The batch transcription module failed unexpectedly.",
+                    ),
+                    attempts,
+                    False,
+                )
+            if isinstance(module_result, BatchTranscriptionFailure):
+                error = ProviderCallError(
+                    category=module_result.category,
+                    retryable=module_result.retryable,
+                    safe_detail=module_result.safe_detail,
+                    retry_after_seconds=module_result.retry_after_seconds,
+                )
                 if not _provider_error_retryable(error) or attempts >= 3:
                     return None, error, attempts, False
                 delay = _provider_retry_delay(
@@ -4096,40 +4116,7 @@ class WatchEvidenceRuntime:
                     return None, None, attempts, True
                 self._retry_sleeper(delay)
                 continue
-            except MissingProviderCredentialError:
-                return (
-                    None,
-                    ProviderCallError(
-                        category="authentication",
-                        retryable=False,
-                        safe_detail="The selected provider credential is unavailable from its permitted source.",
-                    ),
-                    attempts,
-                    False,
-                )
-            except (OSError, TimeoutError):
-                return (
-                    None,
-                    ProviderCallError(
-                        category="permanent",
-                        retryable=False,
-                        safe_detail="The selected provider adapter raised an untyped failure; it was not eligible for retry.",
-                    ),
-                    attempts,
-                    False,
-                )
-            except Exception:
-                return (
-                    None,
-                    ProviderCallError(
-                        category="permanent",
-                        retryable=False,
-                        safe_detail="The selected provider adapter returned an unexpected failure.",
-                    ),
-                    attempts,
-                    False,
-                )
-            if not isinstance(result, ProviderChunkResult):
+            if not isinstance(module_result, BatchTranscriptionSuccess):
                 return (
                     None,
                     ProviderCallError(
@@ -4140,7 +4127,7 @@ class WatchEvidenceRuntime:
                     attempts,
                     False,
                 )
-            return result, None, attempts, False
+            return module_result.result, None, attempts, False
         raise AssertionError("The bounded provider retry loop exceeded its attempt budget.")
 
     def invalid_input(

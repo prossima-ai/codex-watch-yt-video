@@ -746,8 +746,8 @@ class ProviderTranscriptionTests(unittest.TestCase):
         self.assertEqual(extraction[extraction.index("-ss") + 1], "3")
         self.assertEqual(extraction[extraction.index("-t") + 1], "6")
         upload = openai_provider.uploads[0]
-        self.assertEqual(upload.offset_seconds, 3.0)
-        self.assertEqual(upload.duration_seconds, 6.0)
+        self.assertFalse(hasattr(upload, "offset_seconds"))
+        self.assertFalse(hasattr(upload, "duration_seconds"))
         self.assertEqual(
             (
                 outcome.evidence.transcript.segments[0].start_seconds,
@@ -1877,8 +1877,8 @@ class ProviderTranscriptionTests(unittest.TestCase):
         self.assertEqual(outcome.failure.attempts, 3)
         self.assertEqual(len(openai_provider.uploads), 3)
         self.assertEqual(delays, [60.0, 60.0])
-        self.assertIn("&lt;retry later&gt;", outcome.report_markdown)
-        self.assertNotIn("\n## not runtime state", outcome.report_markdown)
+        self.assertNotIn("retry later", outcome.report_markdown)
+        self.assertNotIn("not runtime state", outcome.report_markdown)
 
     def test_runtime_refuses_adapter_attempt_to_retry_a_permanent_category(self) -> None:
         runner = TranscriptionRunner(
