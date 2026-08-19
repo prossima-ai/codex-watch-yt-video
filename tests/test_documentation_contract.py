@@ -13,6 +13,7 @@ SECURITY_AND_PRIVACY = REPOSITORY_ROOT / "docs" / "security-and-privacy.md"
 SETUP_AND_TROUBLESHOOTING = REPOSITORY_ROOT / "docs" / "setup-and-troubleshooting.md"
 THIRD_PARTY_NOTICES = REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md"
 PROVENANCE = REPOSITORY_ROOT / "docs" / "provenance.md"
+ISSUE32_EVIDENCE = REPOSITORY_ROOT / "docs" / "verification" / "issue-32-evidence.json"
 SPECIFICATION = REPOSITORY_ROOT / "docs" / "spec" / "watch-skill.md"
 WATCH_SKILL = REPOSITORY_ROOT / ".agents" / "skills" / "watch" / "SKILL.md"
 DOMAIN_CONTEXT = REPOSITORY_ROOT / "CONTEXT.md"
@@ -198,7 +199,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("No release-facing action surface may invoke", specification)
         self.assertIn("provider credentials or provider clients", specification)
 
-    def test_provenance_has_a_decision_44_completed_local_evidence_record(self) -> None:
+    def test_provenance_has_decision_44_and_issue32_live_evidence_records(self) -> None:
         provenance = self._collapsed(PROVENANCE)
 
         for disclosure in (
@@ -208,7 +209,9 @@ class DocumentationContractTests(unittest.TestCase):
             "227 tests",
             "Standards review | `PASS — no unresolved findings`",
             "Spec review | `PASS — no unresolved findings`",
-            "Live public-caption validation | `BLOCKED`",
+            "Live public-caption validation | `PASS — Issue #32`",
+            "docs/verification/issue-32-evidence.json",
+            "HTTP-403 visual result adds no visual qualification",
             "OpenAI `whisper-1` was explicitly selected",
             "OpenAI `whisper-1` local effective-cap work",
             "233 tests",
@@ -217,6 +220,8 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(disclosure=disclosure):
                 self.assertIn(disclosure, provenance)
+
+        self.assertTrue(ISSUE32_EVIDENCE.is_file())
 
     def test_security_document_requires_distinct_provider_and_secret_gates(
         self,

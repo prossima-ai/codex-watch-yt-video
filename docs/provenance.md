@@ -30,16 +30,16 @@ for a caption request, provider request, deployment, publication, or release.
 | Standards review | `PASS — no unresolved findings` | Independent complete-diff review against `AGENTS.md`, domain docs, architecture, safety, tests, documentation, and maintainability; every actionable finding below was resolved and re-reviewed. |
 | Spec review | `PASS — no unresolved findings` | Independent complete-diff review against Decision #44, this specification, the implementation request, and authorization/release gates; every actionable finding below was resolved and re-reviewed. |
 | Transcription disablement | `PASS — release surface disabled` | `prepare_metadata.py` and `prepare_visual.py` use `release_transcription_providers()`, which returns no providers; tests prove no release-facing transcription choice, credential read, provider client, or direct-caption fallback. The provider-effective-size gate remains unresolved. |
-| Live public-caption validation | `BLOCKED` | No separate explicit human approval has been granted for one named public-caption run. Hermetic tests cannot replace it. |
+| Live public-caption validation | `PASS — Issue #32` | One separately human-approved English automatic-VTT direct-caption action is recorded in `docs/verification/issue-32-evidence.json`. It records a 4 MiB bound, zero redirects, a retained 364,442-byte artifact, partial transcript coverage, and no provider path. The independently approved focused visual rerun received HTTP 403, so it establishes no visual evidence. |
 | Provider validation | `BLOCKED` | OpenAI `whisper-1` was explicitly selected for local implementation. Its 20,000,000-byte complete multipart-request cap and 19,000,000-byte audio budget have hermetic coverage; no credential read, provider contact, live validation, or enablement is authorized. A provider-specific validation plan and separate explicit human approval remain required. |
-| Release gate status | `BLOCKED` | Missing controls/evidence are: one separately approved live public-caption run with adequate sanitized evidence; an OpenAI `whisper-1` validation under separate approval; current provider disclosure/account-limit confirmation; and an explicit human release decision. |
+| Release gate status | `BLOCKED` | Missing controls/evidence include the applicable hermetic, synthetic, Desktop/package, provenance, provider-validation, and human release-decision gates. Issue #32 closes only the L-01 live public-caption row; its HTTP-403 visual result adds no visual qualification. |
 | Human release decision | `PENDING` | No human decision has been requested or received. A human must review this evidence and explicitly record either `Approved for the specifically defined release scope` or `Blocked`, with exact missing evidence or controls. |
 
 No live caption retrieval, live caption validation, transcription, provider
 credential read, provider request, provider validation, deployment, publication,
-or release occurred while creating this record. A future live public-caption
-approval applies only to the named one run; a future provider approval is a
-separate gate and cannot be inferred from it.
+or release occurred while creating the Decision #44 implementation record. The
+separate Issue #32 approval applies only to its named public-caption run; it
+does not authorize a provider action or another live source request.
 
 ### Local validation commands and limits
 
@@ -186,9 +186,6 @@ the documented provider-size discrepancy.
 The remaining live/release gates are:
 
 - Desktop/package/authority checks on the target macOS Codex Desktop host;
-- one separately approved public-caption run for the Decision #44 direct action,
-  with sanitized host/redirect validation, bounded byte count, typed outcome, and
-  proof that transcription/provider code did not run;
 - a conservative provider-specific effective complete-request-size limit before
   any provider is offered for a release. It must include multipart/form-data
   boundaries, per-part headers, metadata, and all other request-body overhead,
