@@ -1,0 +1,125 @@
+{
+  "schema_version": "issue32-live-public-evidence-v1",
+  "issue": 32,
+  "test_id": "L-01 Issue32 direct native-caption validation",
+  "recorded_at_utc": "2026-08-19T06:56:59Z",
+  "base_revision": "59ec45e2ffa80946292ce234acfec1706d0f8316",
+  "implementation_revision": "59ec45e2ffa80946292ce234acfec1706d0f8316",
+  "specification_revision": "9d9eea698b4eda09a435f1b198c606e7058033a6",
+  "outcome": "PASS",
+  "coverage": "partial",
+  "environment": {
+    "host": {
+      "os": "macOS 26.6",
+      "architecture": "arm64"
+    },
+    "desktop": {
+      "observed": false,
+      "limitation": "The run did not expose a Desktop application version."
+    },
+    "tools": {
+      "python": "3.13.3",
+      "yt_dlp": "2026.07.04",
+      "ffmpeg": "9.0",
+      "ffprobe": "9.0",
+      "deno": "2.9.5"
+    }
+  },
+  "source": {
+    "host": "www.youtube.com",
+    "video_id": "5Qu2SkSQeBU",
+    "is_live": false,
+    "duration_seconds": 1835
+  },
+  "trace": [
+    {
+      "stage": "metadata_inventory",
+      "outcome": "PASS",
+      "source_network_approval": "approved"
+    },
+    {
+      "stage": "caption_selection",
+      "outcome": "PASS",
+      "selected_track": "en automatic VTT"
+    },
+    {
+      "stage": "direct_caption_retrieval",
+      "outcome": "PASS",
+      "hostname": "www.youtube.com",
+      "redirect_count": 0,
+      "bytes_read": 364442
+    },
+    {
+      "stage": "focused_visual_rerun",
+      "outcome": "BLOCKED",
+      "http_status": 403,
+      "visual_provenance": "none"
+    }
+  ],
+  "caption_run": {
+    "workspace_id": "workspace__JvCdDVynv7J9xj4IyqKyKQPdWto_Emf",
+    "source_host": "www.youtube.com",
+    "source_network_approval": "approved",
+    "caption_network_approval": "approved_jit",
+    "purpose": "retrieve_selected_native_caption",
+    "byte_cap": 4194304,
+    "redirect_count": 0,
+    "coverage": "partial",
+    "provenance": "automatic_captions",
+    "selected_track": {
+      "language": "en",
+      "caption_type": "automatic",
+      "format": "vtt"
+    },
+    "segment_count": 1998,
+    "available_range_seconds": [1.51, 1835],
+    "unavailable_range_seconds": [0, 1.51],
+    "artifact": {
+      "kind": "caption",
+      "retention": "retained",
+      "size_bytes": 364442,
+      "sha256": "65c283417771339ff055e6cab8ac58e75d65f27cb2ce0963eb53155039858569"
+    },
+    "media_download_completed": false
+  },
+  "visual_run": {
+    "workspace_id": "workspace_3qH_vme4_tEElcc_EEq_zHoBNah9z6GN",
+    "focus_seconds": [469, 479],
+    "max_frames": 10,
+    "source_network_approval": "approved",
+    "media_acquisition": "attempted",
+    "http_status": 403,
+    "outcome": "BLOCKED",
+    "coverage": "none",
+    "provenance": "none",
+    "frames": [],
+    "claims": [],
+    "artifact": {
+      "kind": "media",
+      "retention": "retained",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "limitation": "YouTube returned HTTP 403 during the approved visual media fetch; no frame or visual observation exists."
+  },
+  "side_effect_assertions": {
+    "source_host_request": true,
+    "native_caption_request": true,
+    "provider_contact": false,
+    "audio_upload": false,
+    "credential_read": false,
+    "media_download_completed": false,
+    "visual_frame_written": false,
+    "unrelated_user_file_mutation": false
+  },
+  "qualification": {
+    "L-01": "PASS",
+    "focused_visual_evidence": "BLOCKED",
+    "release_readiness": "BLOCKED"
+  },
+  "limitations": [
+    "This record proves one separately approved direct-caption action only.",
+    "The visual rerun did not yield frame evidence and supports no visual claim.",
+    "No provider, credential, audio upload, Desktop discovery, cleanup, or release behavior is established."
+  ]
+}
