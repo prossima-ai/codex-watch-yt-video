@@ -100,9 +100,38 @@ class BatchTranscriptionModuleTests(unittest.TestCase):
             registry["other"] = RecordingAdapter()  # type: ignore[index]
         with self.assertRaises(FrozenInstanceError):
             RecordingAdapter.descriptor.model = "other"  # type: ignore[misc]
+        with self.assertRaises(AttributeError):
+            registry["openai"].descriptor = RecordingAdapter.descriptor
 
         self.assertEqual(tuple(registry), ("openai", "groq"))
         self.assertEqual(release_transcription_registry(), {})
+
+    def test_module_refuses_a_route_rebound_after_construction(self) -> None:
+        adapter = RecordingAdapter()
+        module = BatchTranscriptionModule(adapter)
+        original_descriptor = module.descriptor
+        adapter.descriptor = ProviderDescriptor(
+            provider="openai",
+            model="replacement-model",
+            destination="https://replacement.example/v1/audio/transcriptions",
+            privacy_url="https://replacement.example/privacy",
+            max_chunk_bytes=1_024,
+            max_encoded_request_bytes=2_048,
+        )
+
+        result = module.transcribe(
+            PreparedAudioUpload(
+                data=b"prepared-audio",
+                filename="audio-chunk-0001.mp3",
+                content_type="audio/mpeg",
+            )
+        )
+
+        self.assertIsInstance(result, BatchTranscriptionFailure)
+        self.assertEqual(result.category, "permanent")
+        self.assertFalse(result.retryable)
+        self.assertEqual(module.descriptor, original_descriptor)
+        self.assertEqual(adapter.uploads, [])
 
     def test_provider_call_error_is_normalized_without_adapter_detail(self) -> None:
         class TypedFailureAdapter(RecordingAdapter):
@@ -123,6 +152,28 @@ class BatchTranscriptionModuleTests(unittest.TestCase):
 
         self.assertIsInstance(result, BatchTranscriptionFailure)
         self.assertEqual(result.category, "authentication")
+        self.assertNotIn("canary", result.safe_detail)
+
+    def test_module_normalizes_unknown_provider_failure_categories(self) -> None:
+        class UnknownFailureAdapter(RecordingAdapter):
+            def transcribe_chunk(self, upload: object) -> ProviderChunkResult:
+                raise ProviderCallError(
+                    category="unknown",  # type: ignore[arg-type]
+                    retryable=True,
+                    safe_detail="adapter-private-detail-canary",
+                )
+
+        result = BatchTranscriptionModule(UnknownFailureAdapter()).transcribe(
+            PreparedAudioUpload(
+                data=b"prepared-audio",
+                filename="audio-chunk-0001.mp3",
+                content_type="audio/mpeg",
+            )
+        )
+
+        self.assertIsInstance(result, BatchTranscriptionFailure)
+        self.assertEqual(result.category, "permanent")
+        self.assertFalse(result.retryable)
         self.assertNotIn("canary", result.safe_detail)
 
 

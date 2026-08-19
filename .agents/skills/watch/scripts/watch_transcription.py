@@ -100,7 +100,8 @@ class ProviderChunkResult:
 
 
 class TranscriptionProvider(Protocol):
-    descriptor: ProviderDescriptor
+    @property
+    def descriptor(self) -> ProviderDescriptor: ...
 
     def transcribe_chunk(self, upload: ProviderAudioUpload) -> ProviderChunkResult: ...
 
@@ -141,6 +142,17 @@ class BatchTranscriptionModule:
 
     def transcribe(self, prepared: PreparedAudioUpload) -> BatchTranscriptionResult:
         try:
+            configured_descriptor = getattr(self._adapter, "descriptor", None)
+            route_is_unchanged = configured_descriptor == self._descriptor
+        except Exception:
+            route_is_unchanged = False
+        if not route_is_unchanged:
+            return BatchTranscriptionFailure(
+                category="permanent",
+                retryable=False,
+                safe_detail=_normalized_failure_detail("permanent"),
+            )
+        try:
             _validate_prepared_upload(prepared, self._descriptor.max_chunk_bytes)
             result = self._adapter.transcribe_chunk(
                 ProviderAudioUpload(
@@ -151,12 +163,16 @@ class BatchTranscriptionModule:
             )
             _validate_provider_chunk_result(result)
         except ProviderCallError as error:
+            category = _normalized_failure_category(error.category)
+            category_is_known = (
+                isinstance(error.category, str) and error.category == category
+            )
             return BatchTranscriptionFailure(
-                category=error.category,
-                retryable=error.retryable,
-                safe_detail=_normalized_failure_detail(error.category),
+                category=category,
+                retryable=error.retryable if category_is_known else False,
+                safe_detail=_normalized_failure_detail(category),
                 retry_after_seconds=error.retry_after_seconds
-                if error.retryable
+                if error.retryable and category_is_known
                 else None,
             )
         except MissingProviderCredentialError:
@@ -317,6 +333,8 @@ class UrllibProviderTransport:
 
 
 class OpenAITranscriptionProvider:
+    __slots__ = ("_credential_reader", "_transport")
+
     descriptor = ProviderDescriptor(
         provider="openai",
         model="whisper-1",
@@ -349,6 +367,8 @@ class OpenAITranscriptionProvider:
 
 
 class GroqTranscriptionProvider:
+    __slots__ = ("_credential_reader", "_transport")
+
     descriptor = ProviderDescriptor(
         provider="groq",
         model="whisper-large-v3",
@@ -680,17 +700,28 @@ def _validate_provider_chunk_result(result: object) -> None:
             raise ValueError("The provider returned an invalid transcription object.")
 
 
+_NORMALIZED_FAILURE_DETAILS: Mapping[ProviderFailureCategory, str] = {
+    "transient_network": "The selected provider request failed transiently.",
+    "rate_limit": "The selected provider rate-limited the request.",
+    "server_error": "The selected provider reported a transient server error.",
+    "authentication": "The selected provider credential or authorization is unavailable.",
+    "invalid_input": "The selected provider rejected the prepared audio input.",
+    "size_format": "The prepared audio exceeded the selected provider safety limit.",
+    "billing_quota": "The selected provider reported a billing or quota limit.",
+    "permanent": "The selected provider request failed permanently.",
+}
+
+
+def _normalized_failure_category(category: object) -> ProviderFailureCategory:
+    if isinstance(category, str):
+        for known_category in _NORMALIZED_FAILURE_DETAILS:
+            if category == known_category:
+                return known_category
+    return "permanent"
+
+
 def _normalized_failure_detail(category: ProviderFailureCategory) -> str:
-    return {
-        "transient_network": "The selected provider request failed transiently.",
-        "rate_limit": "The selected provider rate-limited the request.",
-        "server_error": "The selected provider reported a transient server error.",
-        "authentication": "The selected provider credential or authorization is unavailable.",
-        "invalid_input": "The selected provider rejected the prepared audio input.",
-        "size_format": "The prepared audio exceeded the selected provider safety limit.",
-        "billing_quota": "The selected provider reported a billing or quota limit.",
-        "permanent": "The selected provider request failed permanently.",
-    }[category]
+    return _NORMALIZED_FAILURE_DETAILS[category]
 
 
 def _parse_provider_result(value: object) -> ProviderChunkResult:
