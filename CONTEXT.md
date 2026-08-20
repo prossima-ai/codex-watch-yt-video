@@ -72,6 +72,10 @@ _Avoid_: Citation string, source link, evidence pointer
 The normalized, timestamped source text derived from native captions, not the original VTT, provider response, or unprocessed rolling-caption cues. Release-facing transcription is disabled; a future provider-derived transcript requires its separate effective-request-size, validation, and approval gates.
 _Avoid_: Caption file, provider JSON, verbatim transcript
 
+**Provider usage**:
+The optional aggregate duration, in seconds, reported by the selected Provider across completed audio chunks. It retains no per-chunk accounting or other Provider billing detail.
+_Avoid_: Billing detail, Provider invoice, per-chunk usage
+
 **Current source**:
 The most recent single, unambiguous video URL or resolved local video path established by a watch request in the same task. It remains current even when later acquisition or processing fails, until another source replaces it.
 _Avoid_: Active video, cached video, last upload
