@@ -233,7 +233,7 @@ class DocumentationContractTests(unittest.TestCase):
             "`consent_required`",
             "Only bounded extracted audio chunks may be uploaded",
             "No automatic audio upload",
-            "`OPENAI_API_KEY` and `GROQ_API_KEY`",
+            "development/test-only `MISTRAL_API_KEY`",
             "never request secrets in chat",
             "scan `.env`",
             "persist or log a credential",
@@ -246,6 +246,10 @@ class DocumentationContractTests(unittest.TestCase):
             document,
             r"Provider selection, audio-track selection, fresh provider-specific "
             r"audio-upload consent, and provider-network approval are distinct gates",
+        )
+        self.assertIn(
+            "development/test-only `MISTRAL_API_KEY`",
+            self._collapsed(SPECIFICATION),
         )
         self.assertRegex(
             document,

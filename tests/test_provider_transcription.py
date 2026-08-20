@@ -1461,6 +1461,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             {
                 "OPENAI_API_KEY": "openai-secret-canary",
                 "GROQ_API_KEY": "groq-secret-canary",
+                "MISTRAL_API_KEY": "mistral-secret-canary",
                 "WATCH_SAFE_ENV": "preserved",
             },
         ), patch("watch_evidence.subprocess.run", return_value=completed) as run:
@@ -1469,6 +1470,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn("OPENAI_API_KEY", child_environment)
         self.assertNotIn("GROQ_API_KEY", child_environment)
+        self.assertNotIn("MISTRAL_API_KEY", child_environment)
         self.assertEqual(child_environment["WATCH_SAFE_ENV"], "preserved")
         self.assertEqual(result.stdout, "ok\n")
 

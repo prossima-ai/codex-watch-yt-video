@@ -519,6 +519,7 @@ else:
             development_registry = development_transcription_registry()
             environment["OPENAI_API_KEY"] = "release-openai-credential-canary"
             environment["GROQ_API_KEY"] = "release-groq-credential-canary"
+            environment["MISTRAL_API_KEY"] = "release-mistral-credential-canary"
             session = self.start_session(env=environment)
             try:
                 outcome = self.run_session_request(
