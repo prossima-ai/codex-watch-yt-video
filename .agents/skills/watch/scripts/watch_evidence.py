@@ -612,6 +612,7 @@ class _ConsentSelection:
     workspace_id: str
     base_outcome: EvidenceOutcome
     executable_paths: tuple[tuple[str, str | None], ...]
+    provider_request_scope: WatchControls
     consumed: bool = False
 
 
@@ -2355,9 +2356,16 @@ class WatchEvidenceRuntime:
                 "invalid_request", "The watch request must be one JSON object."
             )
         attempted_caption_receipt = _caption_network_receipt_from_request(watch_request)
+        attempted_provider_receipt = _provider_network_receipt_from_request(
+            watch_request
+        )
         source, validation_failure = self._validate_source(watch_request)
         if validation_failure is not None:
             self._invalidate_caption_network_receipt(attempted_caption_receipt)
+            self._invalidate_provider_network_receipt(attempted_provider_receipt)
+            self._invalidate_provider_network_receipt(
+                _provider_network_receipt_from_prior(prior_evidence)
+            )
             return self._failure_outcome(
                 state="stopped",
                 source=source,
@@ -2368,6 +2376,10 @@ class WatchEvidenceRuntime:
         controls, validation_failure = self._validate_controls(watch_request)
         if validation_failure is not None:
             self._invalidate_caption_network_receipt(attempted_caption_receipt)
+            self._invalidate_provider_network_receipt(attempted_provider_receipt)
+            self._invalidate_provider_network_receipt(
+                _provider_network_receipt_from_prior(prior_evidence)
+            )
             return self._failure_outcome(
                 state="stopped", source=source, failure=validation_failure
             )
@@ -3268,6 +3280,7 @@ class WatchEvidenceRuntime:
             workspace_id=workspace.workspace_id,
             base_outcome=audio_selection.base_outcome,
             executable_paths=audio_selection.executable_paths,
+            provider_request_scope=_provider_request_scope(controls),
         )
         base_outcome = audio_selection.base_outcome
         assert base_outcome.evidence is not None
@@ -3397,6 +3410,8 @@ class WatchEvidenceRuntime:
             or not _prior_evidence_matches_provider_network(
                 prior_evidence, source, selection
             )
+            or _provider_request_scope(controls)
+            != selection.consent_selection.provider_request_scope
         ):
             self._invalidate_provider_network_receipt(
                 _provider_network_receipt_from_prior(prior_evidence)
@@ -3493,7 +3508,7 @@ class WatchEvidenceRuntime:
             )
         return self._prepare_provider_transcription(
             source=source,
-            controls=controls,
+            controls=selection.consent_selection.provider_request_scope,
             selection=selection.consent_selection,
             workspace=workspace,
         )
@@ -9049,6 +9064,16 @@ def _caption_network_receipt_from_request(watch_request: Mapping[str, object]) -
     return receipt if isinstance(receipt, str) else None
 
 
+def _provider_network_receipt_from_request(
+    watch_request: Mapping[str, object],
+) -> str | None:
+    raw_approval = watch_request.get("provider_network_approval")
+    if not isinstance(raw_approval, Mapping):
+        return None
+    receipt = raw_approval.get("receipt")
+    return receipt if isinstance(receipt, str) else None
+
+
 def _provider_network_receipt_from_prior(prior_evidence: object | None) -> str | None:
     if isinstance(prior_evidence, EvidenceOutcome):
         prior_payload: object = prior_evidence.to_dict()
@@ -9061,6 +9086,25 @@ def _provider_network_receipt_from_prior(prior_evidence: object | None) -> str |
         return None
     receipt = raw_approval.get("receipt")
     return receipt if isinstance(receipt, str) else None
+
+
+def _provider_request_scope(controls: WatchControls) -> WatchControls:
+    """Keep only stable Watch controls in a provider-approval binding.
+
+    Choice IDs and approval payloads are one-step hand-off data, not part of
+    the underlying request.  Every remaining field can affect what Watch
+    prepares or reports, so resuming a Provider approval must reproduce it.
+    """
+
+    return replace(
+        controls,
+        caption_track=None,
+        caption_network_approval=None,
+        transcription_choice=None,
+        audio_track=None,
+        audio_upload_consent=None,
+        provider_network_approval=None,
+    )
 
 
 def _caption_network_status_for_error(code: str) -> CaptionNetworkStatus:

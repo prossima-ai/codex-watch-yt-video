@@ -1181,7 +1181,9 @@ class ProviderTranscriptionTests(unittest.TestCase):
     def test_rejected_provider_receipts_stop_before_audio_credentials_or_adapter_calls(self) -> None:
         now = [100.0]
 
-        def pending_approval() -> tuple[object, object, object, list[str], object]:
+        def pending_approval(
+            **request_controls: object,
+        ) -> tuple[object, object, object, list[str], object]:
             runner = TranscriptionRunner(
                 [
                     {
@@ -1207,18 +1209,19 @@ class ProviderTranscriptionTests(unittest.TestCase):
                 },
                 clock=lambda: now[0],
             )
-            provider_decision = runtime.prepare(self.request())
+            provider_decision = runtime.prepare(self.request(**request_controls))
             openai = next(
                 choice
                 for choice in provider_decision.choices
                 if choice.provider == "openai"
             )
             consent = runtime.prepare(
-                self.request(transcription_choice=openai.id),
+                self.request(**request_controls, transcription_choice=openai.id),
                 prior_evidence=provider_decision,
             )
             approval = runtime.prepare(
                 self.request(
+                    **request_controls,
                     audio_upload_consent={
                         "consent_handle": consent.consent_handle,
                         "decision": "approved",
@@ -1270,6 +1273,78 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=approval,
         )
         self.assertEqual(replayed_after_tamper.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        malformed = runtime.prepare(
+            {
+                "sources": [],
+                "provider_network_approval": {
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                },
+            },
+            prior_evidence=approval,
+        )
+        self.assertEqual(malformed.failure.category, "source_count")
+        replayed_after_terminal_validation_failure = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            replayed_after_terminal_validation_failure.failure.category,
+            "provider_approval_invalid",
+        )
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        malformed_controls = runtime.prepare(
+            self.request(provider_network_approval="malformed"),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            malformed_controls.failure.category,
+            "provider_approval_invalid",
+        )
+        replayed_after_control_validation_failure = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            replayed_after_control_validation_failure.failure.category,
+            "provider_approval_invalid",
+        )
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval(
+            focus=[3, 9]
+        )
+        changed_scope = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(changed_scope.failure.category, "provider_approval_invalid")
         self.assertEqual(runner.invocations, [])
         self.assertEqual(credential_reads, [])
         self.assertEqual(transport.calls, [])
