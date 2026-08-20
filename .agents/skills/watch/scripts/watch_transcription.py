@@ -735,8 +735,6 @@ def _normalized_failure_detail(category: ProviderFailureCategory) -> str:
 def _parse_provider_result(value: object) -> ProviderChunkResult:
     if not isinstance(value, Mapping):
         raise ValueError("The provider returned an invalid transcription object.")
-    language_value = value.get("language")
-    language = language_value if isinstance(language_value, str) and language_value else None
     usage_value = value.get("duration")
     if usage_value is None:
         usage_seconds = None
@@ -768,4 +766,4 @@ def _parse_provider_result(value: object) -> ProviderChunkResult:
         ):
             raise ValueError("The provider returned an invalid transcript segment.")
         segments.append(ProviderSegment(text, float(start), float(end)))
-    return ProviderChunkResult(language, tuple(segments), usage_seconds)
+    return ProviderChunkResult(None, tuple(segments), usage_seconds)

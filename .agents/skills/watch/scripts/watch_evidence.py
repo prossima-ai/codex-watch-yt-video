@@ -3859,13 +3859,25 @@ class WatchEvidenceRuntime:
                 duration = min(duration, scoped_duration)
             if duration is None or duration <= 0:
                 raise OSError("The normalized audio duration is unavailable.")
-            actual_coverage_end = source_offset_seconds + duration
+            actual_coverage_end = _finite_time_sum(source_offset_seconds, duration)
+            if (
+                actual_coverage_end is None
+                or actual_coverage_end <= source_offset_seconds
+            ):
+                raise ValueError("The normalized audio coverage endpoint is invalid.")
             requested_coverage_end = (
                 transcript_scope.end_seconds
                 if transcript_scope is not None
                 and transcript_scope.end_seconds is not None
                 else actual_coverage_end
             )
+            if (
+                not isinstance(requested_coverage_end, (int, float))
+                or isinstance(requested_coverage_end, bool)
+                or not math.isfinite(requested_coverage_end)
+                or requested_coverage_end < actual_coverage_end
+            ):
+                raise ValueError("The requested transcript coverage endpoint is invalid.")
             prepared_chunks = self._prepare_audio_chunks(
                 workspace=workspace,
                 normalized_name=normalized_name,
@@ -3903,10 +3915,18 @@ class WatchEvidenceRuntime:
         collected_segments: list[TranscriptSegment] = []
         chunk_records: list[TranscriptChunk] = []
         available_ranges: list[TimeRange] = []
-        aggregate_provider_usage_seconds = 0.0
-        has_provider_usage = False
+        aggregate_provider_usage_seconds: float | None = None
         transcript_language = selection.audio_choice.language or "unknown"
         for prepared_chunk in prepared_chunks:
+            chunk_coverage_end = _finite_time_sum(
+                prepared_chunk.offset_seconds,
+                prepared_chunk.duration_seconds,
+            )
+            if (
+                chunk_coverage_end is None
+                or chunk_coverage_end <= prepared_chunk.offset_seconds
+            ):
+                raise AssertionError("Prepared audio chunk has an invalid coverage endpoint.")
             upload = PreparedAudioUpload(
                 data=prepared_chunk.data,
                 filename=f"audio-chunk-{prepared_chunk.index:04d}.mp3",
@@ -3932,12 +3952,10 @@ class WatchEvidenceRuntime:
                     TranscriptChunk(
                         prepared_chunk.index,
                         prepared_chunk.offset_seconds,
-                        prepared_chunk.offset_seconds
-                        + prepared_chunk.duration_seconds,
+                        chunk_coverage_end,
                         "canceled",
                         attempts,
                         "user_cancellation",
-                        "The user canceled before this chunk completed.",
                     )
                 )
                 return self._provider_interrupted_outcome(
@@ -3950,11 +3968,7 @@ class WatchEvidenceRuntime:
                     language=transcript_language,
                     segments=tuple(collected_segments),
                     available_ranges=tuple(available_ranges),
-                    provider_usage_seconds=(
-                        aggregate_provider_usage_seconds
-                        if has_provider_usage
-                        else None
-                    ),
+                    provider_usage_seconds=aggregate_provider_usage_seconds,
                     unavailable_start=prepared_chunk.offset_seconds,
                     coverage_end=requested_coverage_end,
                     chunks=tuple(chunk_records),
@@ -3987,8 +4001,7 @@ class WatchEvidenceRuntime:
                     TranscriptChunk(
                         prepared_chunk.index,
                         prepared_chunk.offset_seconds,
-                        prepared_chunk.offset_seconds
-                        + prepared_chunk.duration_seconds,
+                        chunk_coverage_end,
                         "failed",
                         attempts,
                         provider_error.category,
@@ -4004,11 +4017,7 @@ class WatchEvidenceRuntime:
                     language=transcript_language,
                     segments=tuple(collected_segments),
                     available_ranges=tuple(available_ranges),
-                    provider_usage_seconds=(
-                        aggregate_provider_usage_seconds
-                        if has_provider_usage
-                        else None
-                    ),
+                    provider_usage_seconds=aggregate_provider_usage_seconds,
                     unavailable_start=prepared_chunk.offset_seconds,
                     coverage_end=requested_coverage_end,
                     chunks=tuple(chunk_records),
@@ -4030,7 +4039,10 @@ class WatchEvidenceRuntime:
                 aggregate_provider_usage_seconds,
                 result.usage_seconds,
             )
-            if segments is None or accumulated_usage_seconds is None:
+            if segments is None or (
+                result.usage_seconds is not None
+                and accumulated_usage_seconds is None
+            ):
                 invalid_response = ProviderCallError(
                     category="invalid_input",
                     retryable=False,
@@ -4052,8 +4064,7 @@ class WatchEvidenceRuntime:
                     TranscriptChunk(
                         prepared_chunk.index,
                         prepared_chunk.offset_seconds,
-                        prepared_chunk.offset_seconds
-                        + prepared_chunk.duration_seconds,
+                        chunk_coverage_end,
                         "failed",
                         attempts,
                         invalid_response.category,
@@ -4069,36 +4080,27 @@ class WatchEvidenceRuntime:
                     language=transcript_language,
                     segments=tuple(collected_segments),
                     available_ranges=tuple(available_ranges),
-                    provider_usage_seconds=(
-                        aggregate_provider_usage_seconds
-                        if has_provider_usage
-                        else None
-                    ),
+                    provider_usage_seconds=aggregate_provider_usage_seconds,
                     unavailable_start=prepared_chunk.offset_seconds,
                     coverage_end=requested_coverage_end,
                     chunks=tuple(chunk_records),
                     category="provider_partial",
                     attempts=attempts,
                     message="A later provider response contained invalid transcript evidence; earlier chunks were retained and no fallback occurred.",
-                )
-            transcript_language = (
-                _optional_text(result.language) or transcript_language
             )
-            if result.usage_seconds is not None:
-                aggregate_provider_usage_seconds = accumulated_usage_seconds
-                has_provider_usage = True
+            aggregate_provider_usage_seconds = accumulated_usage_seconds
             collected_segments.extend(segments)
             available_ranges.append(
                 TimeRange(
                     prepared_chunk.offset_seconds,
-                    prepared_chunk.offset_seconds + prepared_chunk.duration_seconds,
+                    chunk_coverage_end,
                 )
             )
             chunk_records.append(
                 TranscriptChunk(
                     prepared_chunk.index,
                     prepared_chunk.offset_seconds,
-                    prepared_chunk.offset_seconds + prepared_chunk.duration_seconds,
+                    chunk_coverage_end,
                     "succeeded",
                     attempts,
                 )
@@ -4121,9 +4123,7 @@ class WatchEvidenceRuntime:
             provider=provider.descriptor.provider,
             model=provider.descriptor.model,
             chunks=tuple(chunk_records),
-            provider_usage_seconds=(
-                aggregate_provider_usage_seconds if has_provider_usage else None
-            ),
+            provider_usage_seconds=aggregate_provider_usage_seconds,
         )
         base_outcome = selection.base_outcome
         assert base_outcome.evidence is not None
@@ -4208,6 +4208,9 @@ class WatchEvidenceRuntime:
     ) -> tuple[_PreparedAudioChunk, ...]:
         if chunk_limit <= 1:
             raise OSError("The selected provider chunk limit is invalid.")
+        coverage_end = _finite_time_sum(source_offset_seconds, duration_seconds)
+        if coverage_end is None or coverage_end <= source_offset_seconds:
+            raise ValueError("The normalized audio coverage endpoint is invalid.")
         if len(normalized_bytes) < chunk_limit:
             return (
                 _PreparedAudioChunk(
@@ -4228,6 +4231,14 @@ class WatchEvidenceRuntime:
             relative_offset = duration_seconds * index / chunk_count
             relative_end = duration_seconds * (index + 1) / chunk_count
             chunk_duration = relative_end - relative_offset
+            chunk_offset = _finite_time_sum(source_offset_seconds, relative_offset)
+            chunk_end = (
+                _finite_time_sum(chunk_offset, chunk_duration)
+                if chunk_offset is not None
+                else None
+            )
+            if chunk_offset is None or chunk_end is None or chunk_end <= chunk_offset:
+                raise ValueError("The audio chunk coverage endpoint is invalid.")
             chunk_name = f"audio-chunk-{index + 1:04d}.mp3"
             self._transcode_audio_artifact(
                 workspace=workspace,
@@ -4250,7 +4261,7 @@ class WatchEvidenceRuntime:
                 _PreparedAudioChunk(
                     index + 1,
                     chunk_bytes,
-                    source_offset_seconds + relative_offset,
+                    chunk_offset,
                     chunk_duration,
                 )
             )
@@ -7500,6 +7511,14 @@ def _provider_segments(
             or end > duration
         ):
             return None
+        mapped_start = _finite_time_sum(offset_seconds, start)
+        mapped_end = _finite_time_sum(offset_seconds, end)
+        if (
+            mapped_start is None
+            or mapped_end is None
+            or mapped_end <= mapped_start
+        ):
+            return None
         text = " ".join(segment.text.split())
         if not text:
             return None
@@ -7511,8 +7530,8 @@ def _provider_segments(
         normalized.append(
             TranscriptSegment(
                 text=text,
-                start_seconds=offset_seconds + start,
-                end_seconds=offset_seconds + end,
+                start_seconds=mapped_start,
+                end_seconds=mapped_end,
             )
         )
         previous_start = start
@@ -7521,18 +7540,22 @@ def _provider_segments(
 
 
 def _accumulated_provider_usage_seconds(
-    current_seconds: float,
+    current_seconds: float | None,
     next_seconds: float | None,
 ) -> float | None:
-    if (
-        not isinstance(current_seconds, (int, float))
-        or isinstance(current_seconds, bool)
-        or not math.isfinite(current_seconds)
-        or current_seconds < 0
+    if current_seconds is None:
+        current_value = 0.0
+    elif (
+        isinstance(current_seconds, (int, float))
+        and not isinstance(current_seconds, bool)
+        and math.isfinite(current_seconds)
+        and current_seconds >= 0
     ):
+        current_value = float(current_seconds)
+    else:
         return None
     if next_seconds is None:
-        return float(current_seconds)
+        return current_seconds
     if (
         not isinstance(next_seconds, (int, float))
         or isinstance(next_seconds, bool)
@@ -7540,8 +7563,24 @@ def _accumulated_provider_usage_seconds(
         or next_seconds < 0
     ):
         return None
-    total_seconds = float(current_seconds) + float(next_seconds)
+    total_seconds = current_value + float(next_seconds)
     return total_seconds if math.isfinite(total_seconds) else None
+
+
+def _finite_time_sum(start_seconds: object, duration_seconds: object) -> float | None:
+    if (
+        not isinstance(start_seconds, (int, float))
+        or isinstance(start_seconds, bool)
+        or not math.isfinite(start_seconds)
+        or start_seconds < 0
+        or not isinstance(duration_seconds, (int, float))
+        or isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < 0
+    ):
+        return None
+    endpoint = float(start_seconds) + float(duration_seconds)
+    return endpoint if math.isfinite(endpoint) else None
 
 
 def _provider_error_retryable(error: ProviderCallError) -> bool:
