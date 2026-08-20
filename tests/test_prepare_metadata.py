@@ -536,7 +536,7 @@ else:
         self.assertEqual(outcome["state"], "partial")
         self.assertIsNone(outcome["choice_kind"])
         self.assertEqual(outcome["choices"], [])
-        self.assertEqual(tuple(development_registry), ("openai", "groq"))
+        self.assertEqual(tuple(development_registry), ("openai", "groq", "mistral"))
         self.assertFalse(any("--format" in arguments for arguments in invocations))
         self.assertNotIn(
             "default_transcription_providers", PREPARE_METADATA.read_text(encoding="utf-8")
