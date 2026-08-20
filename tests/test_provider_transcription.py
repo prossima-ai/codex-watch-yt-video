@@ -290,6 +290,7 @@ class StaticProviderTransport:
         self.calls.append((descriptor, credential, upload))
         return {
             "language": "en",
+            "duration": 1.0,
             "segments": [{"text": "adapter text", "start": 0.0, "end": 1.0}],
         }
 
@@ -1489,6 +1490,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         result = provider.transcribe_chunk(upload)
 
         self.assertIsInstance(result, ProviderChunkResult)
+        self.assertEqual(result.usage_seconds, 1.0)
         self.assertEqual(requested_names, ["OPENAI_API_KEY"])
         self.assertEqual(len(transport.calls), 1)
         descriptor, credential, sent_upload = transport.calls[0]
@@ -2300,6 +2302,9 @@ class ProviderTranscriptionTests(unittest.TestCase):
             [(chunk.status, chunk.attempts) for chunk in transcript.chunks],
             [("succeeded", 1), ("succeeded", 1), ("failed", 3)],
         )
+        self.assertEqual(transcript.chunks[-1].failure_category, "server_error")
+        self.assertIsNone(transcript.chunks[-1].failure_detail)
+        self.assertNotIn("provider unavailable", json.dumps(outcome.to_dict()))
         self.assertEqual(len(openai_provider.uploads), 5)
         self.assertTrue(all(len(upload.data) < 25 for upload in openai_provider.uploads))
         self.assertTrue(
@@ -2308,7 +2313,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         self.assertIn("6.0", outcome.report_markdown)
         self.assertIn("12.0", outcome.report_markdown)
 
-    def test_silent_successful_chunk_is_preserved_when_a_later_chunk_fails(self) -> None:
+    def test_empty_provider_segments_are_rejected_before_coverage_is_recorded(self) -> None:
         runner = TranscriptionRunner(
             [
                 {
@@ -2359,9 +2364,147 @@ class ProviderTranscriptionTests(unittest.TestCase):
 
         outcome = self.approve_provider_network(runtime, consent)
 
+        self.assertEqual(outcome.state, "failed")
+        self.assertEqual(outcome.failure.category, "provider_permanent")
+        self.assertIsNone(outcome.evidence.transcript)
+        self.assertEqual(len(openai_provider.uploads), 1)
+
+    def test_runtime_rejects_invalid_chunk_relative_segment_order_and_bounds(self) -> None:
+        invalid_segment_sets = (
+            (ProviderSegment(" ", 0.0, 1.0),),
+            (ProviderSegment("non-finite", float("nan"), 1.0),),
+            (ProviderSegment("outside", 0.0, 12.5),),
+            (
+                ProviderSegment("later", 2.0, 2.5),
+                ProviderSegment("earlier", 1.0, 1.5),
+            ),
+        )
+        for segments in invalid_segment_sets:
+            with self.subTest(segments=segments):
+                runner = TranscriptionRunner(
+                    [
+                        {
+                            "format_id": "audio-en-source-id",
+                            "vcodec": "none",
+                            "acodec": "opus",
+                            "language": "en",
+                            "audio_channels": 2,
+                        }
+                    ]
+                )
+                openai_provider = ScriptedProvider(
+                    "openai",
+                    "whisper-1",
+                    [ProviderChunkResult("en", segments)],
+                )
+                runtime = WatchEvidenceRuntime(
+                    command_runner=runner,
+                    find_executable=fake_executable,
+                    transcription_providers={
+                        "openai": openai_provider,
+                        "groq": NeverCalledProvider("groq", "whisper-large-v3"),
+                    },
+                )
+
+                outcome = self.approved_openai_outcome(runtime)
+
+                self.assertEqual(outcome.state, "failed")
+                self.assertEqual(outcome.failure.category, "provider_permanent")
+                self.assertIsNone(outcome.evidence.transcript)
+                self.assertEqual(len(openai_provider.uploads), 1)
+
+    def test_runtime_retains_only_aggregate_provider_usage(self) -> None:
+        runner = TranscriptionRunner(
+            [
+                {
+                    "format_id": "audio-en-source-id",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "language": "en",
+                    "audio_channels": 2,
+                }
+            ],
+            normalized_audio=b"n" * 80,
+            chunk_audio=(b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 10),
+        )
+        openai_provider = ScriptedProvider(
+            "openai",
+            "whisper-1",
+            [
+                ProviderChunkResult(
+                    "en",
+                    (ProviderSegment("Grounded provider text", 1.0, 2.0),),
+                    usage_seconds=2.5,
+                )
+                for _ in range(4)
+            ],
+            max_chunk_bytes=25,
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            find_executable=fake_executable,
+            transcription_providers={
+                "openai": openai_provider,
+                "groq": NeverCalledProvider("groq", "whisper-large-v3"),
+            },
+        )
+
+        outcome = self.approved_openai_outcome(runtime)
+
+        self.assertEqual(outcome.evidence.transcript.provider_usage_seconds, 10.0)
+        self.assertIn("Provider usage seconds: `10.0`", outcome.report_markdown)
+
+    def test_invalid_later_provider_result_retains_earlier_coverage_as_partial(self) -> None:
+        runner = TranscriptionRunner(
+            [
+                {
+                    "format_id": "audio-en-source-id",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "language": "en",
+                    "audio_channels": 2,
+                }
+            ],
+            normalized_audio=b"n" * 80,
+            chunk_audio=(b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 10),
+        )
+        openai_provider = ScriptedProvider(
+            "openai",
+            "whisper-1",
+            [
+                ProviderChunkResult(
+                    "en", (ProviderSegment("first chunk", 0.5, 1.0),)
+                ),
+                ProviderChunkResult(
+                    "en",
+                    (
+                        ProviderSegment("later", 2.0, 2.5),
+                        ProviderSegment("earlier", 1.0, 1.5),
+                    ),
+                ),
+            ],
+            max_chunk_bytes=25,
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            find_executable=fake_executable,
+            transcription_providers={
+                "openai": openai_provider,
+                "groq": NeverCalledProvider("groq", "whisper-large-v3"),
+            },
+        )
+
+        outcome = self.approved_openai_outcome(runtime)
+
         self.assertEqual(outcome.state, "partial")
         self.assertEqual(outcome.failure.category, "provider_partial")
-        self.assertEqual(outcome.evidence.transcript.segments, ())
+        self.assertEqual(
+            [
+                (segment.text, segment.start_seconds, segment.end_seconds)
+                for segment in outcome.evidence.transcript.segments
+            ],
+            [("first chunk", 0.5, 1.0)],
+        )
         self.assertEqual(
             [
                 (item.start_seconds, item.end_seconds)
@@ -2370,9 +2513,68 @@ class ProviderTranscriptionTests(unittest.TestCase):
             [(0.0, 3.0)],
         )
         self.assertEqual(
-            [chunk.status for chunk in outcome.evidence.transcript.chunks],
-            ["succeeded", "failed"],
+            [
+                (item.start_seconds, item.end_seconds)
+                for item in outcome.evidence.transcript.unavailable_ranges
+            ],
+            [(3.0, 12.0)],
         )
+        self.assertEqual(
+            outcome.evidence.transcript.chunks[-1].failure_category, "invalid_input"
+        )
+        self.assertIsNone(outcome.evidence.transcript.chunks[-1].failure_detail)
+        self.assertEqual(len(openai_provider.uploads), 2)
+
+    def test_runtime_rejects_overflowing_aggregate_provider_usage(self) -> None:
+        runner = TranscriptionRunner(
+            [
+                {
+                    "format_id": "audio-en-source-id",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "language": "en",
+                    "audio_channels": 2,
+                }
+            ],
+            normalized_audio=b"n" * 80,
+            chunk_audio=(b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 10),
+        )
+        largest_finite_usage = sys.float_info.max
+        openai_provider = ScriptedProvider(
+            "openai",
+            "whisper-1",
+            [
+                ProviderChunkResult(
+                    "en",
+                    (ProviderSegment("first chunk", 0.5, 1.0),),
+                    usage_seconds=largest_finite_usage,
+                ),
+                ProviderChunkResult(
+                    "en",
+                    (ProviderSegment("second chunk", 0.5, 1.0),),
+                    usage_seconds=largest_finite_usage,
+                ),
+            ],
+            max_chunk_bytes=25,
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            find_executable=fake_executable,
+            transcription_providers={
+                "openai": openai_provider,
+                "groq": NeverCalledProvider("groq", "whisper-large-v3"),
+            },
+        )
+
+        outcome = self.approved_openai_outcome(runtime)
+
+        self.assertEqual(outcome.state, "partial")
+        self.assertEqual(outcome.failure.category, "provider_partial")
+        self.assertEqual(
+            outcome.evidence.transcript.provider_usage_seconds, largest_finite_usage
+        )
+        self.assertEqual(len(openai_provider.uploads), 2)
+        json.dumps(outcome.to_dict(), allow_nan=False)
 
     def test_cancellation_before_extraction_retains_reusable_evidence_until_explicit_cleanup(self) -> None:
         runner = TranscriptionRunner(

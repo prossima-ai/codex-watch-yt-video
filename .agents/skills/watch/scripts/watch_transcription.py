@@ -97,6 +97,7 @@ class ProviderSegment:
 class ProviderChunkResult:
     language: str | None
     segments: tuple[ProviderSegment, ...]
+    usage_seconds: float | None = None
 
 
 class TranscriptionProvider(Protocol):
@@ -686,6 +687,13 @@ def _validate_provider_chunk_result(result: object) -> None:
         raise ValueError("The provider returned an invalid transcription object.")
     if result.language is not None and not isinstance(result.language, str):
         raise ValueError("The provider returned an invalid transcription object.")
+    if result.usage_seconds is not None and (
+        not isinstance(result.usage_seconds, (int, float))
+        or isinstance(result.usage_seconds, bool)
+        or not math.isfinite(result.usage_seconds)
+        or result.usage_seconds < 0
+    ):
+        raise ValueError("The provider returned an invalid transcription object.")
     for segment in result.segments:
         if (
             not isinstance(segment, ProviderSegment)
@@ -729,6 +737,18 @@ def _parse_provider_result(value: object) -> ProviderChunkResult:
         raise ValueError("The provider returned an invalid transcription object.")
     language_value = value.get("language")
     language = language_value if isinstance(language_value, str) and language_value else None
+    usage_value = value.get("duration")
+    if usage_value is None:
+        usage_seconds = None
+    elif (
+        isinstance(usage_value, (int, float))
+        and not isinstance(usage_value, bool)
+        and math.isfinite(usage_value)
+        and usage_value >= 0
+    ):
+        usage_seconds = float(usage_value)
+    else:
+        raise ValueError("The provider returned invalid transcription usage.")
     raw_segments = value.get("segments")
     if not isinstance(raw_segments, Sequence) or isinstance(raw_segments, (str, bytes)):
         raise ValueError("The provider returned invalid transcript segments.")
@@ -748,4 +768,4 @@ def _parse_provider_result(value: object) -> ProviderChunkResult:
         ):
             raise ValueError("The provider returned an invalid transcript segment.")
         segments.append(ProviderSegment(text, float(start), float(end)))
-    return ProviderChunkResult(language, tuple(segments))
+    return ProviderChunkResult(language, tuple(segments), usage_seconds)
