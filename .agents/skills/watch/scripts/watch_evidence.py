@@ -765,7 +765,11 @@ class SubprocessCommandRunner:
         output_fd: int | None = None,
     ) -> CommandResult:
         run_kwargs: dict[str, object] = {}
-        provider_credential_names = {"OPENAI_API_KEY", "GROQ_API_KEY"}
+        provider_credential_names = {
+            "OPENAI_API_KEY",
+            "GROQ_API_KEY",
+            "MISTRAL_API_KEY",
+        }
         # Iterate names first so provider credential values are neither read nor
         # inherited by yt-dlp, ffmpeg, ffprobe, or any other local command.
         run_kwargs["env"] = {

@@ -180,9 +180,9 @@ provider's state. The runtime must not silently fall back to another provider.
 Partial provider results remain partial and name missing intervals rather than
 being represented as a complete transcript.
 
-The only named environment credentials are `OPENAI_API_KEY` and `GROQ_API_KEY`.
-After a future selected-provider gate has passed, an adapter may read only its
-own value at provider call time. The release-facing path reads neither value. The
+The named environment credentials are `OPENAI_API_KEY`, `GROQ_API_KEY`, and the
+development/test-only `MISTRAL_API_KEY`. Each selected adapter may read only its
+own value at provider call time. The release-facing path reads none of them. The
 skill must never request secrets in chat, accept a secret as a control, scan
 `.env`, persist or log a credential, include one in a report, filename, URL, or
 command argument, probe an unselected provider, or silently fall back after a

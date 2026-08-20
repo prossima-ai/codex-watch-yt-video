@@ -25,9 +25,12 @@ from urllib.request import (
 )
 
 
-ProviderName = Literal["openai", "groq"]
+ProviderName = Literal["openai", "groq", "mistral"]
 OPENAI_MAX_AUDIO_CHUNK_BYTES = 19_000_000
 OPENAI_MAX_ENCODED_REQUEST_BYTES = 20_000_000
+# Conservative local development bounds, not a claim about Mistral entitlement.
+MISTRAL_MAX_AUDIO_CHUNK_BYTES = 19_000_000
+MISTRAL_MAX_ENCODED_REQUEST_BYTES = 20_000_000
 TRANSCRIPTION_RELEASE_ENABLED = False
 TRANSCRIPTION_RELEASE_BLOCKER = (
     "Provider transcription is release-disabled until each selected provider has "
@@ -206,6 +209,17 @@ class ProviderTransport(Protocol):
     ) -> object: ...
 
 
+class EncodedProviderTransport(Protocol):
+    def send_encoded(
+        self,
+        descriptor: ProviderDescriptor,
+        credential: str,
+        *,
+        body: bytes,
+        content_type: str,
+    ) -> object: ...
+
+
 class RejectingProviderRedirectHandler(HTTPRedirectHandler):
     """Reject every provider redirect before an authorization header can move."""
 
@@ -277,6 +291,22 @@ class UrllibProviderTransport:
         upload: ProviderAudioUpload,
     ) -> object:
         _validate_upload(upload, descriptor.max_chunk_bytes)
+        body, content_type = _multipart_request_body(descriptor, upload)
+        return self.send_encoded(
+            descriptor,
+            credential,
+            body=body,
+            content_type=content_type,
+        )
+
+    def send_encoded(
+        self,
+        descriptor: ProviderDescriptor,
+        credential: str,
+        *,
+        body: bytes,
+        content_type: str,
+    ) -> object:
         parsed_destination = urlsplit(descriptor.destination)
         if (
             parsed_destination.scheme != "https"
@@ -289,7 +319,6 @@ class UrllibProviderTransport:
                 retryable=False,
                 safe_detail="The selected provider destination is invalid.",
             )
-        body, content_type = _multipart_request_body(descriptor, upload)
         _validate_encoded_request_size(descriptor, body)
         request = Request(
             descriptor.destination,
@@ -398,6 +427,54 @@ class GroqTranscriptionProvider:
         return _parse_provider_result(response)
 
 
+class MistralTranscriptionProvider:
+    """Pinned direct-upload adapter, available only through the development registry."""
+
+    __slots__ = ("_credential_reader", "_transport")
+
+    descriptor = ProviderDescriptor(
+        provider="mistral",
+        model="voxtral-mini-2602",
+        destination="https://api.mistral.ai/v1/audio/transcriptions",
+        privacy_url="https://docs.mistral.ai/admin/monitor-comply/privacy-data-controls",
+        max_chunk_bytes=MISTRAL_MAX_AUDIO_CHUNK_BYTES,
+        max_encoded_request_bytes=MISTRAL_MAX_ENCODED_REQUEST_BYTES,
+    )
+
+    def __init__(
+        self,
+        *,
+        credential_reader: Callable[[str], str | None],
+        transport: EncodedProviderTransport,
+    ) -> None:
+        self._credential_reader = credential_reader
+        self._transport = transport
+
+    def transcribe_chunk(self, upload: ProviderAudioUpload) -> ProviderChunkResult:
+        if not isinstance(upload, ProviderAudioUpload):
+            raise ValueError("The provider input is not one bounded audio-only chunk.")
+        _validate_upload(upload, self.descriptor.max_chunk_bytes)
+        request_body, content_type = _multipart_request_body(
+            self.descriptor,
+            upload,
+            response_format=None,
+            timestamp_field="timestamp_granularities",
+        )
+        _validate_encoded_request_size(self.descriptor, request_body)
+        credential = self._credential_reader("MISTRAL_API_KEY")
+        if not isinstance(credential, str) or not credential:
+            raise MissingProviderCredentialError(
+                "MISTRAL_API_KEY is unavailable from the permitted credential source."
+            )
+        response = self._transport.send_encoded(
+            self.descriptor,
+            credential,
+            body=request_body,
+            content_type=content_type,
+        )
+        return _parse_mistral_provider_result(response)
+
+
 def development_transcription_registry() -> Mapping[
     ProviderName, TranscriptionProvider
 ]:
@@ -409,6 +486,10 @@ def development_transcription_registry() -> Mapping[
             transport=UrllibProviderTransport(),
         ),
         "groq": GroqTranscriptionProvider(
+            credential_reader=_environment_credential_reader,
+            transport=UrllibProviderTransport(),
+        ),
+        "mistral": MistralTranscriptionProvider(
             credential_reader=_environment_credential_reader,
             transport=UrllibProviderTransport(),
         ),
@@ -434,13 +515,17 @@ def release_transcription_providers() -> Mapping[ProviderName, TranscriptionProv
 
 
 def _environment_credential_reader(name: str) -> str | None:
-    if name not in {"OPENAI_API_KEY", "GROQ_API_KEY"}:
+    if name not in {"OPENAI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"}:
         return None
     return os.environ.get(name)
 
 
 def _multipart_request_body(
-    descriptor: ProviderDescriptor, upload: ProviderAudioUpload | AudioChunkUpload
+    descriptor: ProviderDescriptor,
+    upload: ProviderAudioUpload | AudioChunkUpload,
+    *,
+    response_format: str | None = "verbose_json",
+    timestamp_field: str = "timestamp_granularities[]",
 ) -> tuple[bytes, str]:
     boundary = "codex-watch-" + secrets.token_hex(16)
     while boundary.encode("ascii") in upload.data:
@@ -460,6 +545,9 @@ def _multipart_request_body(
             + b"\r\n"
         )
 
+    response_format_field = (
+        () if response_format is None else (text_field("response_format", response_format),)
+    )
     body = b"".join(
         (
             delimiter,
@@ -471,8 +559,8 @@ def _multipart_request_body(
             upload.data,
             b"\r\n",
             text_field("model", descriptor.model),
-            text_field("response_format", "verbose_json"),
-            text_field("timestamp_granularities[]", "segment"),
+            *response_format_field,
+            text_field(timestamp_field, "segment"),
             ending,
         )
     )
@@ -767,3 +855,28 @@ def _parse_provider_result(value: object) -> ProviderChunkResult:
             raise ValueError("The provider returned an invalid transcript segment.")
         segments.append(ProviderSegment(text, float(start), float(end)))
     return ProviderChunkResult(None, tuple(segments), usage_seconds)
+
+
+def _parse_mistral_provider_result(value: object) -> ProviderChunkResult:
+    if not isinstance(value, Mapping) or value.get("model") != "voxtral-mini-2602":
+        raise ValueError("The selected provider returned an invalid transcription object.")
+    usage = value.get("usage")
+    if usage is None:
+        usage_seconds = None
+    elif (
+        isinstance(usage, Mapping)
+        and isinstance(usage.get("prompt_audio_seconds"), (int, float))
+        and not isinstance(usage.get("prompt_audio_seconds"), bool)
+        and math.isfinite(float(usage["prompt_audio_seconds"]))
+        and float(usage["prompt_audio_seconds"]) >= 0
+    ):
+        usage_seconds = float(usage["prompt_audio_seconds"])
+    else:
+        raise ValueError("The provider returned invalid transcription usage.")
+    return _parse_provider_result(
+        {
+            "language": value.get("language"),
+            "duration": usage_seconds,
+            "segments": value.get("segments"),
+        }
+    )
