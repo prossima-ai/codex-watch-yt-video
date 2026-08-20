@@ -77,7 +77,7 @@ The most recent single, unambiguous video URL or resolved local video path estab
 _Avoid_: Active video, cached video, last upload
 
 **Choice kind**:
-The category of pending user selection in a `decision_required` outcome: caption track, direct caption-network action, audio track, or a future transcription action. The release-facing action surface does not offer `transcription`.
+The category of pending user selection in a `decision_required` outcome: caption track, direct caption-network action, Provider-network action, audio track, or a future transcription action. The release-facing action surface does not offer `transcription`.
 _Avoid_: Decision type, selection category
 
 **Caption-network action**:
@@ -88,8 +88,16 @@ _Avoid_: Caption URL approval, downloader side effect, generic receipt action
 An opaque, single-use same-session receipt bound to one Watch request, source, workspace, selected track, supported format, byte cap, and normalized HTTPS origin. It expires after five minutes or request end and is invalid after a use, denial, cancellation, failure, retry, or mismatch; it never contains or authorizes a raw caption URL.
 _Avoid_: URL, token, persistent grant, reusable consent
 
+**Provider-network action**:
+The separate action that pauses after fresh Audio-upload consent and before any audio extraction, provider credential lookup, or Provider adapter invocation. It is bound to one selected Provider route and audio track; it is not audio-upload consent, source-host approval, or a generic network permission.
+_Avoid_: Provider opt-in, reusable provider approval, implicit retry authorization
+
+**Provider-network approval receipt**:
+An opaque, single-use same-session receipt bound to one Watch request, source, workspace, selected Provider route, selected audio track, disclosed request limit, and retry budget. It expires after five minutes or request end and is invalid after use, denial, cancellation, failure, retry, terminal outcome, or any binding mismatch. It never authorizes a different request, route, track, limit, or retry.
+_Avoid_: Boolean approval, persistent grant, reusable consent
+
 **Decision handle**:
-An opaque task-session token emitted with a `decision_required` outcome for sanitized choice lists. The caption-network action emits no separate decision handle: its native-caption approval receipt is the only action handle. Neither token selects a choice nor authorizes cross-task reuse.
+An opaque task-session token emitted with a `decision_required` outcome for sanitized choice lists. The caption-network and Provider-network actions emit no separate decision handle: their respective approval receipts are the only action handles. Neither token selects a choice nor authorizes cross-task reuse.
 _Avoid_: Session key, persistent token, reusable cache key
 
 **Evidence coverage**:

@@ -346,16 +346,33 @@ class ProviderTranscriptionTests(unittest.TestCase):
             self.request(**controls, transcription_choice=openai.id),
             prior_evidence=provider_decision,
         )
-        return runtime.prepare(
+        return self.approve_provider_network(runtime, consent, **controls)
+
+    def approve_provider_network(
+        self,
+        runtime: WatchEvidenceRuntime,
+        consent: object,
+        **controls: object,
+    ) -> object:
+        network_approval = runtime.prepare(
             self.request(
                 **controls,
                 audio_upload_consent={
                     "consent_handle": consent.consent_handle,
                     "decision": "approved",
                 },
-                provider_network_approved=True,
             ),
             prior_evidence=consent,
+        )
+        return runtime.prepare(
+            self.request(
+                **controls,
+                provider_network_approval={
+                    "receipt": network_approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                },
+            ),
+            prior_evidence=network_approval,
         )
 
     def test_missing_provider_selection_pauses_before_audio_or_provider_work(self) -> None:
@@ -723,17 +740,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
 
         self.assertEqual(consent.consent.estimated_duration_seconds, 6.0)
         self.assertEqual(consent.consent.estimated_bytes, 48000)
-        outcome = runtime.prepare(
-            self.request(
-                focus=[3, 9],
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent, focus=[3, 9])
 
         extraction = next(
             arguments
@@ -977,7 +984,6 @@ class ProviderTranscriptionTests(unittest.TestCase):
                     "consent_handle": "consent_not-issued",
                     "decision": "approved",
                 },
-                provider_network_approved=True,
             ),
             prior_evidence=consent,
         )
@@ -1043,7 +1049,6 @@ class ProviderTranscriptionTests(unittest.TestCase):
                                 "consent_handle": consent_outcome.consent_handle,
                                 "decision": "approved",
                             },
-                            provider_network_approved=True,
                         ),
                         prior_evidence=prior,
                     )
@@ -1054,7 +1059,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
                     )
                     self.assertEqual(runner.invocations, [])
 
-    def test_source_approval_does_not_replace_provider_network_approval(self) -> None:
+    def test_fresh_consent_issues_a_route_bound_network_receipt_before_side_effects(self) -> None:
         runner = TranscriptionRunner(
             [
                 {
@@ -1086,7 +1091,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         )
         runner.invocations.clear()
 
-        stopped = runtime.prepare(
+        approval_required = runtime.prepare(
             self.request(
                 audio_upload_consent={
                     "consent_handle": consent.consent_handle,
@@ -1096,10 +1101,15 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=consent,
         )
 
-        self.assertEqual(stopped.state, "stopped")
-        self.assertEqual(stopped.failure.category, "network_approval_required")
-        self.assertIsNotNone(stopped.evidence)
-        self.assertEqual(stopped.coverage.metadata, "complete")
+        self.assertEqual(approval_required.state, "decision_required")
+        self.assertEqual(approval_required.choice_kind, "provider_network")
+        self.assertIsNotNone(approval_required.provider_network_approval)
+        approval = approval_required.provider_network_approval
+        self.assertEqual(approval.provider, "openai")
+        self.assertEqual(approval.model, "whisper-1")
+        self.assertEqual(approval.selected_audio_track_id, consent.consent.selected_audio_track.id)
+        self.assertEqual(approval.request_limit_bytes, 1024)
+        self.assertEqual(approval.retry_budget, 3)
         self.assertEqual(runner.invocations, [])
 
     def test_fresh_consent_uploads_only_selected_bounded_audio_to_selected_provider(self) -> None:
@@ -1135,16 +1145,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         )
         runner.invocations.clear()
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "ready")
         self.assertEqual(outcome.coverage.transcript, "complete")
@@ -1176,6 +1177,273 @@ class ProviderTranscriptionTests(unittest.TestCase):
             "transcript evidence is unavailable", outcome.report_markdown
         )
         self.assertNotIn("No visual fallback exists", outcome.report_markdown)
+
+    def test_rejected_provider_receipts_stop_before_audio_credentials_or_adapter_calls(self) -> None:
+        now = [100.0]
+
+        def pending_approval(
+            **request_controls: object,
+        ) -> tuple[object, object, object, list[str], object]:
+            runner = TranscriptionRunner(
+                [
+                    {
+                        "format_id": "audio-en-source-id",
+                        "vcodec": "none",
+                        "acodec": "opus",
+                        "language": "en",
+                        "audio_channels": 2,
+                    }
+                ]
+            )
+            credential_reads: list[str] = []
+            transport = StaticProviderTransport()
+            runtime = WatchEvidenceRuntime(
+                command_runner=runner,
+                find_executable=fake_executable,
+                transcription_providers={
+                    "openai": OpenAITranscriptionProvider(
+                        credential_reader=lambda name: credential_reads.append(name)
+                        or "fixture-secret",
+                        transport=transport,
+                    )
+                },
+                clock=lambda: now[0],
+            )
+            provider_decision = runtime.prepare(self.request(**request_controls))
+            openai = next(
+                choice
+                for choice in provider_decision.choices
+                if choice.provider == "openai"
+            )
+            consent = runtime.prepare(
+                self.request(**request_controls, transcription_choice=openai.id),
+                prior_evidence=provider_decision,
+            )
+            approval = runtime.prepare(
+                self.request(
+                    **request_controls,
+                    audio_upload_consent={
+                        "consent_handle": consent.consent_handle,
+                        "decision": "approved",
+                    }
+                ),
+                prior_evidence=consent,
+            )
+            runner.invocations.clear()
+            return runtime, runner, approval, credential_reads, transport
+
+        for decision in ("declined", "canceled"):
+            with self.subTest(decision=decision):
+                runtime, runner, approval, credential_reads, transport = pending_approval()
+                outcome = runtime.prepare(
+                    self.request(
+                        provider_network_approval={
+                            "receipt": approval.provider_network_approval.receipt,
+                            "decision": decision,
+                        }
+                    ),
+                    prior_evidence=approval,
+                )
+                self.assertIn(outcome.state, {"stopped", "canceled"})
+                self.assertEqual(runner.invocations, [])
+                self.assertEqual(credential_reads, [])
+                self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        tampered = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt + "_tampered",
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(tampered.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+        replayed_after_tamper = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(replayed_after_tamper.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        malformed = runtime.prepare(
+            {
+                "sources": [],
+                "provider_network_approval": {
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                },
+            },
+            prior_evidence=approval,
+        )
+        self.assertEqual(malformed.failure.category, "source_count")
+        replayed_after_terminal_validation_failure = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            replayed_after_terminal_validation_failure.failure.category,
+            "provider_approval_invalid",
+        )
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        malformed_controls = runtime.prepare(
+            self.request(provider_network_approval="malformed"),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            malformed_controls.failure.category,
+            "provider_approval_invalid",
+        )
+        replayed_after_control_validation_failure = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(
+            replayed_after_control_validation_failure.failure.category,
+            "provider_approval_invalid",
+        )
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval(
+            focus=[3, 9]
+        )
+        changed_scope = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(changed_scope.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        changed_prompt = approval.to_dict()
+        changed_prompt["provider_network_approval"]["selected_audio_track_id"] = "other"
+        mismatched = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=changed_prompt,
+        )
+        self.assertEqual(mismatched.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        now[0] += 5 * 60
+        expired = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(expired.failure.category, "provider_approval_expired")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        runtime, runner, approval, credential_reads, transport = pending_approval()
+        consumed = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(consumed.state, "ready")
+        runner.invocations.clear()
+        credential_reads.clear()
+        transport.calls.clear()
+        replayed = runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(replayed.failure.category, "provider_approval_invalid")
+        self.assertEqual(runner.invocations, [])
+        self.assertEqual(credential_reads, [])
+        self.assertEqual(transport.calls, [])
+
+        _, _, approval, _, _ = pending_approval()
+        cross_session_runner = TranscriptionRunner()
+        cross_session_credentials: list[str] = []
+        cross_session_transport = StaticProviderTransport()
+        cross_session_runtime = WatchEvidenceRuntime(
+            command_runner=cross_session_runner,
+            find_executable=fake_executable,
+            transcription_providers={
+                "openai": OpenAITranscriptionProvider(
+                    credential_reader=lambda name: cross_session_credentials.append(name)
+                    or "fixture-secret",
+                    transport=cross_session_transport,
+                )
+            },
+            clock=lambda: now[0],
+        )
+        cross_session = cross_session_runtime.prepare(
+            self.request(
+                provider_network_approval={
+                    "receipt": approval.provider_network_approval.receipt,
+                    "decision": "approved",
+                }
+            ),
+            prior_evidence=approval,
+        )
+        self.assertEqual(cross_session.failure.category, "provider_approval_invalid")
+        flattened_arguments = [
+            argument
+            for _, arguments in cross_session_runner.invocations
+            for argument in arguments
+        ]
+        self.assertNotIn("-map", flattened_arguments)
+        self.assertEqual(cross_session_credentials, [])
+        self.assertEqual(cross_session_transport.calls, [])
 
     def test_non_provider_subprocesses_never_inherit_provider_credentials(self) -> None:
         completed = SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
@@ -1713,16 +1981,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             self.request(transcription_choice=openai.id),
             prior_evidence=provider_decision,
         )
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.evidence.transcript.segments[0].text, hostile_text)
         self.assertNotIn(hostile_text, outcome.report_markdown)
@@ -1797,16 +2056,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             self.request(transcription_choice=openai.id),
             prior_evidence=provider_decision,
         )
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         serialized_outcome = json.dumps(outcome.to_dict(), ensure_ascii=True)
         serialized_commands = json.dumps(runner.invocations, ensure_ascii=True)
@@ -1861,16 +2111,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "failed")
         self.assertEqual(outcome.failure.category, "provider_transient")
@@ -1924,16 +2165,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "failed")
         self.assertEqual(outcome.failure.category, "provider_permanent")
@@ -1977,16 +2209,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.failure.category, "provider_permanent")
         self.assertEqual(outcome.failure.attempts, 1)
@@ -2051,16 +2274,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "partial")
         self.assertEqual(outcome.failure.category, "provider_partial")
@@ -2143,16 +2357,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "partial")
         self.assertEqual(outcome.failure.category, "provider_partial")
@@ -2202,16 +2407,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         )
         runner.invocations.clear()
 
-        canceled = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        canceled = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(canceled.state, "canceled")
         self.assertTrue(canceled.terminal)
@@ -2273,16 +2469,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             prior_evidence=provider_decision,
         )
 
-        outcome = runtime.prepare(
-            self.request(
-                audio_upload_consent={
-                    "consent_handle": consent.consent_handle,
-                    "decision": "approved",
-                },
-                provider_network_approved=True,
-            ),
-            prior_evidence=consent,
-        )
+        outcome = self.approve_provider_network(runtime, consent)
 
         self.assertEqual(outcome.state, "canceled")
         self.assertEqual(outcome.failure.stage, "audio_extraction")

@@ -36,6 +36,13 @@ from watch_caption_network import (
     CaptionUnavailable,
     caption_resource,
 )
+from watch_provider_network import (
+    ProviderNetworkApproval,
+    ProviderNetworkApprovalDecision,
+    ProviderNetworkApprovalReceiptError,
+    ProviderNetworkApprovalRegistry,
+    ProviderNetworkBinding,
+)
 from watch_transcription import (
     BatchTranscriptionFailure,
     BatchTranscriptionModule,
@@ -71,7 +78,13 @@ EvidenceStage = Literal[
     "provider",
     "caption_network",
 ]
-ChoiceKind = Literal["caption_track", "caption_network", "audio_track", "transcription"]
+ChoiceKind = Literal[
+    "caption_track",
+    "caption_network",
+    "provider_network",
+    "audio_track",
+    "transcription",
+]
 CaptionType = Literal["manual", "automatic"]
 TranscriptProvenance = Literal[
     "manual_captions",
@@ -100,6 +113,9 @@ FailureCategory = Literal[
     "invalid_selection",
     "missing_dependency",
     "network_approval_required",
+    "provider_approval_invalid",
+    "provider_approval_expired",
+    "provider_approval_declined",
     "tool_execution",
     "metadata_probe",
     "unsupported_playlist",
@@ -217,7 +233,7 @@ class WatchControls:
     transcription_choice: str | None
     audio_track: str | None
     audio_upload_consent: ConsentDecision | None
-    provider_network_approved: bool
+    provider_network_approval: ProviderNetworkApprovalDecision | None
 
 
 @dataclass(frozen=True)
@@ -427,6 +443,7 @@ class EvidenceOutcome:
     decision_handle: str | None = None
     caption_network_approval: CaptionNetworkApproval | None = None
     caption_network_audit: CaptionNetworkAudit | None = None
+    provider_network_approval: ProviderNetworkApproval | None = None
     consent: ConsentRequest | None = None
     consent_handle: str | None = None
     workspace_id: str | None = None
@@ -468,6 +485,7 @@ CURRENT_SOURCE_NO_WORKSPACE = EvidenceDisposition(
 JAVASCRIPT_NOT_CHECKED = JavaScriptSupport("not_checked", None)
 MAX_CAPTION_BYTES = 4 * 1024 * 1024
 MAX_AUDIO_CHUNK_BYTES = 24 * 1024 * 1024 - 1
+PROVIDER_RETRY_BUDGET = 3
 SUPPORTED_CAPTION_FORMATS = frozenset({"ttml", "vtt"})
 CAPTION_FORMAT_PREFERENCE = ("vtt", "ttml")
 WORKSPACE_SCHEMA = "codex-watch-workspace"
@@ -594,7 +612,15 @@ class _ConsentSelection:
     workspace_id: str
     base_outcome: EvidenceOutcome
     executable_paths: tuple[tuple[str, str | None], ...]
+    provider_request_scope: WatchControls
     consumed: bool = False
+
+
+@dataclass(frozen=True)
+class _ProviderNetworkSelection:
+    consent_selection: _ConsentSelection
+    binding: ProviderNetworkBinding
+    approval: ProviderNetworkApproval
 
 
 @dataclass(frozen=True)
@@ -821,6 +847,9 @@ class WatchEvidenceRuntime:
         self._caption_receipts = CaptionApprovalRegistry(clock=clock)
         self._caption_network_selections: dict[str, _CaptionNetworkSelection] = {}
         self._caption_session_id = f"caption_session_{secrets.token_urlsafe(18)}"
+        self._provider_network_receipts = ProviderNetworkApprovalRegistry(clock=clock)
+        self._provider_network_selections: dict[str, _ProviderNetworkSelection] = {}
+        self._provider_session_id = f"provider_session_{secrets.token_urlsafe(18)}"
         self._transcription_selections: dict[str, _TranscriptionSelection] = {}
         self._audio_selections: dict[str, _AudioSelection] = {}
         self._consent_selections: dict[str, _ConsentSelection] = {}
@@ -841,6 +870,8 @@ class WatchEvidenceRuntime:
 
         self._caption_receipts.invalidate_all()
         self._caption_network_selections.clear()
+        self._provider_network_receipts.invalidate_all()
+        self._provider_network_selections.clear()
         for record in self._workspaces.values():
             lock_file = record.lock_file
             if not lock_file.closed:
@@ -2153,6 +2184,8 @@ class WatchEvidenceRuntime:
             evidence_handle=evidence_handle,
             disposition=disposition,
         )
+        if retained.terminal:
+            self._invalidate_provider_network_workspace(record.workspace_id)
         if store:
             record.outcome = retained
             if retained.controls is not None:
@@ -2173,11 +2206,27 @@ class WatchEvidenceRuntime:
         )
         for receipt in stale_receipts:
             self._caption_network_selections.pop(receipt, None)
+        self._invalidate_provider_network_workspace(record.workspace_id)
         if record.evidence_handle is not None:
             self._evidence_handles.pop(record.evidence_handle, None)
             self._retired_evidence_handles[record.evidence_handle] = record
         if self._current_workspace_id == record.workspace_id:
             self._current_workspace_id = None
+
+    def _invalidate_provider_network_receipt(self, receipt: object) -> None:
+        self._provider_network_receipts.invalidate_receipt(receipt)
+        if isinstance(receipt, str):
+            self._provider_network_selections.pop(receipt, None)
+
+    def _invalidate_provider_network_workspace(self, workspace_id: str) -> None:
+        self._provider_network_receipts.invalidate_workspace(workspace_id)
+        stale_receipts = tuple(
+            receipt
+            for receipt, selection in self._provider_network_selections.items()
+            if selection.binding.workspace_id == workspace_id
+        )
+        for receipt in stale_receipts:
+            self._provider_network_selections.pop(receipt, None)
 
     def _reuse_outcome(
         self,
@@ -2307,9 +2356,16 @@ class WatchEvidenceRuntime:
                 "invalid_request", "The watch request must be one JSON object."
             )
         attempted_caption_receipt = _caption_network_receipt_from_request(watch_request)
+        attempted_provider_receipt = _provider_network_receipt_from_request(
+            watch_request
+        )
         source, validation_failure = self._validate_source(watch_request)
         if validation_failure is not None:
             self._invalidate_caption_network_receipt(attempted_caption_receipt)
+            self._invalidate_provider_network_receipt(attempted_provider_receipt)
+            self._invalidate_provider_network_receipt(
+                _provider_network_receipt_from_prior(prior_evidence)
+            )
             return self._failure_outcome(
                 state="stopped",
                 source=source,
@@ -2320,6 +2376,10 @@ class WatchEvidenceRuntime:
         controls, validation_failure = self._validate_controls(watch_request)
         if validation_failure is not None:
             self._invalidate_caption_network_receipt(attempted_caption_receipt)
+            self._invalidate_provider_network_receipt(attempted_provider_receipt)
+            self._invalidate_provider_network_receipt(
+                _provider_network_receipt_from_prior(prior_evidence)
+            )
             return self._failure_outcome(
                 state="stopped", source=source, failure=validation_failure
             )
@@ -2621,21 +2681,18 @@ class WatchEvidenceRuntime:
                     category="consent_declined",
                     message="Fresh provider-specific audio-upload consent was declined; no audio was extracted or uploaded.",
                 )
-            if not controls.provider_network_approved:
-                return self._retained_terminal_outcome(
-                    state="stopped",
-                    source=source,
-                    controls=controls,
-                    selection=consent_selection,
-                    workspace=workspace,
-                    category="network_approval_required",
-                    message="Separate host command-network approval for the selected provider is required; no audio was extracted or uploaded.",
-                )
-            return self._prepare_provider_transcription(
+            return self._provider_network_approval_required(
                 source=source,
                 controls=controls,
-                selection=consent_selection,
+                consent_selection=consent_selection,
                 workspace=workspace,
+            )
+
+        if controls.provider_network_approval is not None:
+            return self._resume_provider_network_action(
+                source=source,
+                controls=controls,
+                prior_evidence=prior_evidence,
             )
 
         if controls.caption_network_approval is not None:
@@ -3223,6 +3280,7 @@ class WatchEvidenceRuntime:
             workspace_id=workspace.workspace_id,
             base_outcome=audio_selection.base_outcome,
             executable_paths=audio_selection.executable_paths,
+            provider_request_scope=_provider_request_scope(controls),
         )
         base_outcome = audio_selection.base_outcome
         assert base_outcome.evidence is not None
@@ -3254,6 +3312,206 @@ class WatchEvidenceRuntime:
             consent_handle=consent_handle,
         )
         return self._attach_workspace_outcome(workspace, pending, store=True)
+
+    def _provider_network_approval_required(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        consent_selection: _ConsentSelection,
+        workspace: _WorkspaceRecord,
+    ) -> EvidenceOutcome:
+        provider_name = consent_selection.provider_choice.provider
+        provider = (
+            self._batch_transcription_modules.get(provider_name)
+            if provider_name is not None
+            else None
+        )
+        if provider is None:
+            return self._retained_terminal_outcome(
+                state="stopped",
+                source=source,
+                controls=controls,
+                selection=consent_selection,
+                workspace=workspace,
+                category="invalid_selection",
+                message="The selected provider is unavailable; no audio was extracted.",
+            )
+        self._invalidate_provider_network_workspace(workspace.workspace_id)
+        request_limit_bytes = (
+            provider.descriptor.max_encoded_request_bytes
+            or provider.descriptor.max_chunk_bytes
+        )
+        binding = ProviderNetworkBinding(
+            action="transcribe_selected_audio",
+            watch_request_id=_new_provider_request_id(),
+            source_value=source.value,
+            session_id=self._provider_session_id,
+            workspace_id=workspace.workspace_id,
+            provider=provider.descriptor.provider,
+            model=provider.descriptor.model,
+            destination=provider.descriptor.destination,
+            selected_audio_track_id=consent_selection.audio_choice.id,
+            request_limit_bytes=request_limit_bytes,
+            retry_budget=PROVIDER_RETRY_BUDGET,
+        )
+        approval = self._provider_network_receipts.issue(binding)
+        self._provider_network_selections[approval.receipt] = _ProviderNetworkSelection(
+            consent_selection=consent_selection,
+            binding=binding,
+            approval=approval,
+        )
+        base_outcome = consent_selection.base_outcome
+        assert base_outcome.evidence is not None
+        report = _render_report(
+            state="decision_required",
+            source=source,
+            metadata=base_outcome.evidence.metadata,
+            transcript=base_outcome.evidence.transcript,
+            coverage=base_outcome.coverage,
+            answerability=base_outcome.answerability,
+            warnings=base_outcome.warnings,
+            tools=base_outcome.tools,
+            javascript_support=base_outcome.javascript_support,
+            controls=controls,
+            visual=base_outcome.evidence.visual,
+            choice_kind="provider_network",
+            provider_network_approval=approval,
+        )
+        outcome = replace(
+            base_outcome,
+            state="decision_required",
+            terminal=False,
+            controls=controls,
+            report_markdown=report,
+            choice_kind="provider_network",
+            choices=(),
+            decision_handle=None,
+            consent=None,
+            consent_handle=None,
+            provider_network_approval=approval,
+        )
+        return self._attach_workspace_outcome(workspace, outcome, store=True)
+
+    def _resume_provider_network_action(
+        self,
+        *,
+        source: Source,
+        controls: WatchControls,
+        prior_evidence: object | None,
+    ) -> EvidenceOutcome:
+        decision = controls.provider_network_approval
+        assert decision is not None
+        selection = self._provider_network_selections.get(decision.receipt)
+        if (
+            selection is None
+            or selection.binding.source_value != source.value
+            or prior_evidence is None
+            or not _prior_evidence_matches_provider_network(
+                prior_evidence, source, selection
+            )
+            or _provider_request_scope(controls)
+            != selection.consent_selection.provider_request_scope
+        ):
+            self._invalidate_provider_network_receipt(
+                _provider_network_receipt_from_prior(prior_evidence)
+            )
+            self._invalidate_provider_network_receipt(decision.receipt)
+            if selection is None:
+                return self._failure_outcome(
+                    state="stopped",
+                    source=source,
+                    controls=controls,
+                    failure=_validation_failure(
+                        "provider_approval_invalid",
+                        "The provider-network approval receipt is unknown, stale, altered, cross-session, or does not match the same-task approval prompt.",
+                    ),
+                )
+            workspace = self._workspaces.get(selection.binding.workspace_id)
+            if workspace is None:
+                return self._failure_outcome(
+                    state="stopped",
+                    source=source,
+                    controls=controls,
+                    failure=_validation_failure(
+                        "provider_approval_invalid",
+                        "The provider-network approval workspace is no longer eligible; no audio was extracted.",
+                    ),
+                )
+            return self._retained_terminal_outcome(
+                state="stopped",
+                source=source,
+                controls=controls,
+                selection=selection.consent_selection,
+                workspace=workspace,
+                category="provider_approval_invalid",
+                message="The provider-network approval receipt is unknown, stale, altered, cross-session, or does not match the same-task approval prompt.",
+            )
+        workspace = self._workspaces.get(selection.binding.workspace_id)
+        if (
+            workspace is None
+            or not workspace.reuse_eligible
+            or self._workspace_validation_error(workspace) is not None
+        ):
+            if workspace is not None:
+                self._revoke_workspace(workspace, "cleanup_refused")
+            self._invalidate_provider_network_receipt(decision.receipt)
+            return self._failure_outcome(
+                state="stopped",
+                source=source,
+                controls=controls,
+                failure=_validation_failure(
+                    "provider_approval_invalid",
+                    "The provider-network approval workspace is no longer eligible; no audio was extracted.",
+                ),
+            )
+        try:
+            verified = self._provider_network_receipts.verify_and_consume(
+                decision, selection.binding
+            )
+        except ProviderNetworkApprovalReceiptError as error:
+            self._invalidate_provider_network_receipt(decision.receipt)
+            category: FailureCategory = (
+                "provider_approval_expired"
+                if error.code == "expired_receipt"
+                else "provider_approval_invalid"
+            )
+            return self._retained_terminal_outcome(
+                state="stopped",
+                source=source,
+                controls=controls,
+                selection=selection.consent_selection,
+                workspace=workspace,
+                category=category,
+                message=str(error),
+            )
+        self._provider_network_selections.pop(decision.receipt, None)
+        if verified.decision == "declined":
+            return self._retained_terminal_outcome(
+                state="stopped",
+                source=source,
+                controls=controls,
+                selection=selection.consent_selection,
+                workspace=workspace,
+                category="provider_approval_declined",
+                message="Provider-network approval was declined; no audio was extracted, no credential was read, and no provider request was made.",
+            )
+        if verified.decision == "canceled" or self._cancellation_requested():
+            return self._retained_terminal_outcome(
+                state="canceled",
+                source=source,
+                controls=controls,
+                selection=selection.consent_selection,
+                workspace=workspace,
+                category="user_cancellation",
+                message="The provider-network action was canceled before audio extraction.",
+            )
+        return self._prepare_provider_transcription(
+            source=source,
+            controls=selection.consent_selection.provider_request_scope,
+            selection=selection.consent_selection,
+            workspace=workspace,
+        )
 
     def _retained_terminal_outcome(
         self,
@@ -4081,7 +4339,7 @@ class WatchEvidenceRuntime:
         bool,
     ]:
         attempts = 0
-        while attempts < 3:
+        while attempts < PROVIDER_RETRY_BUDGET:
             if self._cancellation_requested():
                 return None, None, attempts, True
             attempts += 1
@@ -4105,7 +4363,10 @@ class WatchEvidenceRuntime:
                     safe_detail=module_result.safe_detail,
                     retry_after_seconds=module_result.retry_after_seconds,
                 )
-                if not _provider_error_retryable(error) or attempts >= 3:
+                if (
+                    not _provider_error_retryable(error)
+                    or attempts >= PROVIDER_RETRY_BUDGET
+                ):
                     return None, error, attempts, False
                 delay = _provider_retry_delay(
                     error,
@@ -4228,7 +4489,7 @@ class WatchEvidenceRuntime:
             "transcription_choice",
             "audio_track",
             "audio_upload_consent",
-            "provider_network_approved",
+            "provider_network_approval",
             "source_network_approved",
         }
         unknown_fields = sorted(
@@ -4369,13 +4630,29 @@ class WatchEvidenceRuntime:
                 consent_handle=consent_handle,
                 decision=consent_decision,
             )
-        provider_network_approved = watch_request.get(
-            "provider_network_approved", False
-        )
-        if not isinstance(provider_network_approved, bool):
-            return None, _validation_failure(
-                "invalid_control",
-                "provider_network_approved must be true or false.",
+        raw_provider_approval = watch_request.get("provider_network_approval")
+        provider_network_approval: ProviderNetworkApprovalDecision | None = None
+        if raw_provider_approval is not None:
+            if not isinstance(raw_provider_approval, Mapping) or set(
+                raw_provider_approval
+            ) != {"receipt", "decision"}:
+                return None, _validation_failure(
+                    "provider_approval_invalid",
+                    "provider_network_approval must contain exactly receipt and decision.",
+                )
+            receipt = raw_provider_approval.get("receipt")
+            decision = raw_provider_approval.get("decision")
+            if (
+                not isinstance(receipt, str)
+                or not receipt.strip()
+                or not isinstance(decision, str)
+            ):
+                return None, _validation_failure(
+                    "provider_approval_invalid",
+                    "provider_network_approval is not a valid fresh provider receipt decision.",
+                )
+            provider_network_approval = ProviderNetworkApprovalDecision(
+                receipt, decision
             )
         if sum(
             value is not None
@@ -4385,6 +4662,7 @@ class WatchEvidenceRuntime:
                 transcription_choice,
                 audio_track,
                 audio_upload_consent,
+                provider_network_approval,
             )
         ) > 1:
             return None, _validation_failure(
@@ -4407,7 +4685,7 @@ class WatchEvidenceRuntime:
                 transcription_choice=transcription_choice,
                 audio_track=audio_track,
                 audio_upload_consent=audio_upload_consent,
-                provider_network_approved=provider_network_approved,
+                provider_network_approval=provider_network_approval,
             ),
             None,
         )
@@ -7456,6 +7734,10 @@ def _new_caption_request_id() -> str:
     return f"caption_request_{secrets.token_urlsafe(24)}"
 
 
+def _new_provider_request_id() -> str:
+    return f"provider_request_{secrets.token_urlsafe(24)}"
+
+
 def _new_choice_id(kind: ChoiceKind) -> str:
     return f"{kind}_{secrets.token_urlsafe(24)}"
 
@@ -7966,7 +8248,7 @@ def _reuse_controls_match(
         ("transcription_choice", "transcription_choice"),
         ("audio_track", "audio_track"),
         ("audio_upload_consent", "audio_upload_consent"),
-        ("provider_network_approved", "provider_network_approved"),
+        ("provider_network_approval", "provider_network_approval"),
     ):
         if request_name in raw_request and getattr(retained, attribute) != getattr(
             requested, attribute
@@ -8119,6 +8401,32 @@ def _prior_evidence_matches_consent(
         and prior_source.get("current") is True
         and isinstance(raw_consent, Mapping)
         and dict(raw_consent) == asdict(selection.consent)
+    )
+
+
+def _prior_evidence_matches_provider_network(
+    prior_evidence: object,
+    source: Source,
+    selection: _ProviderNetworkSelection,
+) -> bool:
+    if isinstance(prior_evidence, EvidenceOutcome):
+        prior_payload: object = prior_evidence.to_dict()
+    else:
+        prior_payload = prior_evidence
+    if not isinstance(prior_payload, Mapping):
+        return False
+    prior_source = prior_payload.get("source")
+    raw_approval = prior_payload.get("provider_network_approval")
+    return (
+        prior_payload.get("state") == "decision_required"
+        and prior_payload.get("terminal") is False
+        and prior_payload.get("choice_kind") == "provider_network"
+        and isinstance(prior_source, Mapping)
+        and prior_source.get("kind") == source.kind
+        and prior_source.get("value") == source.value
+        and prior_source.get("current") is True
+        and isinstance(raw_approval, Mapping)
+        and dict(raw_approval) == asdict(selection.approval)
     )
 
 
@@ -8756,6 +9064,49 @@ def _caption_network_receipt_from_request(watch_request: Mapping[str, object]) -
     return receipt if isinstance(receipt, str) else None
 
 
+def _provider_network_receipt_from_request(
+    watch_request: Mapping[str, object],
+) -> str | None:
+    raw_approval = watch_request.get("provider_network_approval")
+    if not isinstance(raw_approval, Mapping):
+        return None
+    receipt = raw_approval.get("receipt")
+    return receipt if isinstance(receipt, str) else None
+
+
+def _provider_network_receipt_from_prior(prior_evidence: object | None) -> str | None:
+    if isinstance(prior_evidence, EvidenceOutcome):
+        prior_payload: object = prior_evidence.to_dict()
+    else:
+        prior_payload = prior_evidence
+    if not isinstance(prior_payload, Mapping):
+        return None
+    raw_approval = prior_payload.get("provider_network_approval")
+    if not isinstance(raw_approval, Mapping):
+        return None
+    receipt = raw_approval.get("receipt")
+    return receipt if isinstance(receipt, str) else None
+
+
+def _provider_request_scope(controls: WatchControls) -> WatchControls:
+    """Keep only stable Watch controls in a provider-approval binding.
+
+    Choice IDs and approval payloads are one-step hand-off data, not part of
+    the underlying request.  Every remaining field can affect what Watch
+    prepares or reports, so resuming a Provider approval must reproduce it.
+    """
+
+    return replace(
+        controls,
+        caption_track=None,
+        caption_network_approval=None,
+        transcription_choice=None,
+        audio_track=None,
+        audio_upload_consent=None,
+        provider_network_approval=None,
+    )
+
+
 def _caption_network_status_for_error(code: str) -> CaptionNetworkStatus:
     if code == "http_failure":
         return "http_failed"
@@ -8869,6 +9220,7 @@ def _render_report(
     ] = (),
     decision_handle: str | None = None,
     caption_network_approval: CaptionNetworkApproval | None = None,
+    provider_network_approval: ProviderNetworkApproval | None = None,
     consent: ConsentRequest | None = None,
     consent_handle: str | None = None,
 ) -> str:
@@ -9052,6 +9404,29 @@ def _render_report(
                     f"`{caption_network_approval.byte_cap}`",
                     "- Caption approval receipt: "
                     f"`{caption_network_approval.receipt}`",
+                ]
+            )
+        if provider_network_approval is not None:
+            lines.extend(
+                [
+                    "- Provider action: `transcribe_selected_audio`",
+                    f"- Provider: `{provider_network_approval.provider}`",
+                    "- Provider model: "
+                    + _render_preescaped_markdown_code(
+                        provider_network_approval.model
+                    ),
+                    "- Provider destination: "
+                    + _render_preescaped_markdown_code(
+                        provider_network_approval.destination
+                    ),
+                    "- Selected audio track: "
+                    f"`{provider_network_approval.selected_audio_track_id}`",
+                    "- Provider request byte limit: "
+                    f"`{provider_network_approval.request_limit_bytes}`",
+                    "- Provider retry budget: "
+                    f"`{provider_network_approval.retry_budget}`",
+                    "- Provider approval receipt: "
+                    f"`{provider_network_approval.receipt}`",
                 ]
             )
         for choice in choices:
