@@ -91,6 +91,7 @@ TranscriptProvenance = Literal[
     "automatic_captions",
     "openai_whisper",
     "groq_whisper",
+    "mistral_voxtral",
 ]
 FailureCategory = Literal[
     "source_count",
@@ -7627,11 +7628,12 @@ def _provider_retry_delay(
 
 
 def _provider_provenance(
-    provider: Literal["openai", "groq"],
+    provider: Literal["openai", "groq", "mistral"],
 ) -> TranscriptProvenance:
     return {
         "openai": "openai_whisper",
         "groq": "groq_whisper",
+        "mistral": "mistral_voxtral",
     }[provider]
 
 

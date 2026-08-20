@@ -31,6 +31,7 @@ from watch_transcription import (  # noqa: E402
     AudioChunkUpload,
     BatchTranscriptionFailure,
     BatchTranscriptionModule,
+    MISTRAL_MODEL,
     MistralTranscriptionProvider,
     MissingProviderCredentialError,
     OpenAITranscriptionProvider,
@@ -340,22 +341,30 @@ class ProviderTranscriptionTests(unittest.TestCase):
             **controls,
         }
 
+    def approved_provider_outcome(
+        self,
+        runtime: WatchEvidenceRuntime,
+        provider_name: str,
+        **controls: object,
+    ) -> object:
+        provider_decision = runtime.prepare(self.request(**controls))
+        provider_choice = next(
+            choice
+            for choice in provider_decision.choices
+            if choice.provider == provider_name
+        )
+        consent = runtime.prepare(
+            self.request(**controls, transcription_choice=provider_choice.id),
+            prior_evidence=provider_decision,
+        )
+        return self.approve_provider_network(runtime, consent, **controls)
+
     def approved_openai_outcome(
         self,
         runtime: WatchEvidenceRuntime,
         **controls: object,
     ) -> object:
-        provider_decision = runtime.prepare(self.request(**controls))
-        openai = next(
-            choice
-            for choice in provider_decision.choices
-            if choice.provider == "openai"
-        )
-        consent = runtime.prepare(
-            self.request(**controls, transcription_choice=openai.id),
-            prior_evidence=provider_decision,
-        )
-        return self.approve_provider_network(runtime, consent, **controls)
+        return self.approved_provider_outcome(runtime, "openai", **controls)
 
     def approve_provider_network(
         self,
@@ -1187,6 +1196,35 @@ class ProviderTranscriptionTests(unittest.TestCase):
         )
         self.assertNotIn("No visual fallback exists", outcome.report_markdown)
 
+    def test_mistral_runtime_records_safe_provenance(self) -> None:
+        runner = TranscriptionRunner(
+            [
+                {
+                    "format_id": "audio-en-source-id",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "language": "en",
+                    "audio_channels": 2,
+                }
+            ]
+        )
+        mistral_provider = RecordingProvider("mistral", MISTRAL_MODEL)
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            find_executable=fake_executable,
+            transcription_providers={"mistral": mistral_provider},
+        )
+
+        outcome = self.approved_provider_outcome(runtime, "mistral")
+
+        self.assertEqual(outcome.state, "ready")
+        self.assertEqual(outcome.coverage.transcript, "complete")
+        transcript = outcome.evidence.transcript
+        self.assertEqual(transcript.provenance, "mistral_voxtral")
+        self.assertEqual(transcript.provider, "mistral")
+        self.assertEqual(transcript.model, MISTRAL_MODEL)
+        self.assertEqual(len(mistral_provider.uploads), 1)
+
     def test_rejected_provider_receipts_stop_before_audio_credentials_or_adapter_calls(self) -> None:
         now = [100.0]
 
@@ -1522,7 +1560,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
                 self.calls.append((descriptor, credential, body))
                 self.content_type = content_type
                 return {
-                    "model": "voxtral-mini-2602",
+                    "model": MISTRAL_MODEL,
                     "usage": {"prompt_audio_seconds": 1.0},
                     "segments": [],
                 }
@@ -1542,7 +1580,8 @@ class ProviderTranscriptionTests(unittest.TestCase):
         result = provider.transcribe_chunk(upload)
 
         self.assertEqual(provider.descriptor.provider, "mistral")
-        self.assertEqual(provider.descriptor.model, "voxtral-mini-2602")
+        self.assertEqual(MISTRAL_MODEL, "voxtral-mini-2602")
+        self.assertEqual(provider.descriptor.model, MISTRAL_MODEL)
         self.assertEqual(
             provider.descriptor.destination,
             "https://api.mistral.ai/v1/audio/transcriptions",
@@ -1621,7 +1660,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         opener = FakeProviderOpener(
             FakeHTTPResponse(
                 {
-                    "model": "voxtral-mini-2602",
+                    "model": MISTRAL_MODEL,
                     "usage": {"prompt_audio_seconds": 1.0},
                     "segments": [],
                 }
@@ -1637,7 +1676,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         request, _ = opener.calls[0]
         body = request.data
         self.assertIn(b'name="model"', body)
-        self.assertIn(b"voxtral-mini-2602", body)
+        self.assertIn(MISTRAL_MODEL.encode("ascii"), body)
         self.assertIn(b'name="timestamp_granularities"', body)
         self.assertIn(b"segment", body)
         self.assertNotIn(b"response_format", body)
@@ -2461,6 +2500,64 @@ class ProviderTranscriptionTests(unittest.TestCase):
         )
         self.assertIn("6.0", outcome.report_markdown)
         self.assertIn("12.0", outcome.report_markdown)
+
+    def test_mistral_later_chunk_failure_retains_safe_provenance(self) -> None:
+        runner = TranscriptionRunner(
+            [
+                {
+                    "format_id": "audio-en-source-id",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "language": "en",
+                    "audio_channels": 2,
+                }
+            ],
+            normalized_audio=b"n" * 80,
+            chunk_audio=(b"a" * 10, b"b" * 10, b"c" * 10, b"d" * 10),
+        )
+        mistral_provider = ScriptedProvider(
+            "mistral",
+            MISTRAL_MODEL,
+            [
+                ProviderChunkResult(
+                    "en", (ProviderSegment("first chunk", 0.5, 1.0),)
+                ),
+                *[
+                    ProviderCallError(
+                        category="server_error",
+                        retryable=True,
+                        safe_detail="provider unavailable",
+                        status_code=503,
+                    )
+                    for _ in range(3)
+                ],
+            ],
+            max_chunk_bytes=25,
+        )
+        runtime = WatchEvidenceRuntime(
+            command_runner=runner,
+            find_executable=fake_executable,
+            transcription_providers={"mistral": mistral_provider},
+            retry_sleeper=lambda _: None,
+            retry_jitter=lambda _: 0.0,
+        )
+
+        outcome = self.approved_provider_outcome(runtime, "mistral")
+
+        self.assertEqual(outcome.state, "partial")
+        self.assertEqual(outcome.failure.category, "provider_partial")
+        transcript = outcome.evidence.transcript
+        self.assertEqual(transcript.provenance, "mistral_voxtral")
+        self.assertEqual(transcript.provider, "mistral")
+        self.assertEqual(transcript.model, MISTRAL_MODEL)
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in transcript.available_ranges],
+            [(0.0, 3.0)],
+        )
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in transcript.unavailable_ranges],
+            [(3.0, 12.0)],
+        )
 
     def test_empty_provider_segments_are_rejected_before_coverage_is_recorded(self) -> None:
         runner = TranscriptionRunner(
