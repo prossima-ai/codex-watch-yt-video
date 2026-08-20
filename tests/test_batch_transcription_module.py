@@ -103,7 +103,7 @@ class BatchTranscriptionModuleTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             registry["openai"].descriptor = RecordingAdapter.descriptor
 
-        self.assertEqual(tuple(registry), ("openai", "groq"))
+        self.assertEqual(tuple(registry), ("openai", "groq", "mistral"))
         self.assertEqual(release_transcription_registry(), {})
 
     def test_module_refuses_a_route_rebound_after_construction(self) -> None:

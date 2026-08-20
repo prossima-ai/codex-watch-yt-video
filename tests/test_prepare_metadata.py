@@ -519,6 +519,7 @@ else:
             development_registry = development_transcription_registry()
             environment["OPENAI_API_KEY"] = "release-openai-credential-canary"
             environment["GROQ_API_KEY"] = "release-groq-credential-canary"
+            environment["MISTRAL_API_KEY"] = "release-mistral-credential-canary"
             session = self.start_session(env=environment)
             try:
                 outcome = self.run_session_request(
@@ -536,7 +537,7 @@ else:
         self.assertEqual(outcome["state"], "partial")
         self.assertIsNone(outcome["choice_kind"])
         self.assertEqual(outcome["choices"], [])
-        self.assertEqual(tuple(development_registry), ("openai", "groq"))
+        self.assertEqual(tuple(development_registry), ("openai", "groq", "mistral"))
         self.assertFalse(any("--format" in arguments for arguments in invocations))
         self.assertNotIn(
             "default_transcription_providers", PREPARE_METADATA.read_text(encoding="utf-8")

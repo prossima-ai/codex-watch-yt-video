@@ -29,9 +29,14 @@ from watch_evidence import (  # noqa: E402
 from watch_answer import compose_watch_answer  # noqa: E402
 from watch_transcription import (  # noqa: E402
     AudioChunkUpload,
+    BatchTranscriptionFailure,
+    BatchTranscriptionModule,
+    MistralTranscriptionProvider,
     MissingProviderCredentialError,
     OpenAITranscriptionProvider,
+    PreparedAudioUpload,
     ProviderCallError,
+    ProviderAudioUpload,
     ProviderChunkResult,
     ProviderDescriptor,
     ProviderSegment,
@@ -1456,6 +1461,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             {
                 "OPENAI_API_KEY": "openai-secret-canary",
                 "GROQ_API_KEY": "groq-secret-canary",
+                "MISTRAL_API_KEY": "mistral-secret-canary",
                 "WATCH_SAFE_ENV": "preserved",
             },
         ), patch("watch_evidence.subprocess.run", return_value=completed) as run:
@@ -1464,6 +1470,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn("OPENAI_API_KEY", child_environment)
         self.assertNotIn("GROQ_API_KEY", child_environment)
+        self.assertNotIn("MISTRAL_API_KEY", child_environment)
         self.assertEqual(child_environment["WATCH_SAFE_ENV"], "preserved")
         self.assertEqual(result.stdout, "ok\n")
 
@@ -1502,6 +1509,142 @@ class ProviderTranscriptionTests(unittest.TestCase):
         self.assertEqual(credential, "selected-openai-secret")
         self.assertIs(sent_upload, upload)
 
+    def test_mistral_adapter_uses_the_pinned_direct_audio_route_and_safe_usage(self) -> None:
+        class MistralTransport(StaticProviderTransport):
+            def send_encoded(
+                self,
+                descriptor: ProviderDescriptor,
+                credential: str,
+                *,
+                body: bytes,
+                content_type: str,
+            ) -> object:
+                self.calls.append((descriptor, credential, body))
+                self.content_type = content_type
+                return {
+                    "model": "voxtral-mini-2602",
+                    "usage": {"prompt_audio_seconds": 1.0},
+                    "segments": [],
+                }
+
+        requested_names: list[str] = []
+        transport = MistralTransport()
+        provider = MistralTranscriptionProvider(
+            credential_reader=lambda name: requested_names.append(name) or "secret",
+            transport=transport,
+        )
+        upload = ProviderAudioUpload(
+            data=b"audio-only",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+        )
+
+        result = provider.transcribe_chunk(upload)
+
+        self.assertEqual(provider.descriptor.provider, "mistral")
+        self.assertEqual(provider.descriptor.model, "voxtral-mini-2602")
+        self.assertEqual(
+            provider.descriptor.destination,
+            "https://api.mistral.ai/v1/audio/transcriptions",
+        )
+        self.assertEqual(requested_names, ["MISTRAL_API_KEY"])
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(result.usage_seconds, 1.0)
+
+    def test_mistral_adapter_rejects_a_returned_model_that_is_not_the_pinned_route(self) -> None:
+        class MismatchedModelTransport(StaticProviderTransport):
+            def send_encoded(
+                self,
+                descriptor: ProviderDescriptor,
+                credential: str,
+                *,
+                body: bytes,
+                content_type: str,
+            ) -> object:
+                del descriptor, credential, body, content_type
+                return {
+                    "model": "voxtral-mini-latest",
+                    "usage": {"prompt_audio_seconds": 1.0},
+                    "segments": [],
+                }
+
+        result = BatchTranscriptionModule(
+            MistralTranscriptionProvider(
+                credential_reader=lambda _name: "secret",
+                transport=MismatchedModelTransport(),
+            )
+        ).transcribe(
+            PreparedAudioUpload(
+                data=b"audio-only",
+                filename="audio-chunk-0001.mp3",
+                content_type="audio/mpeg",
+            )
+        )
+
+        self.assertIsInstance(result, BatchTranscriptionFailure)
+        self.assertEqual(result.category, "permanent")
+        self.assertFalse(result.retryable)
+
+    def test_mistral_measures_the_complete_request_before_credential_or_dispatch(self) -> None:
+        class TinyRequestMistral(MistralTranscriptionProvider):
+            descriptor = replace(
+                MistralTranscriptionProvider.descriptor,
+                max_encoded_request_bytes=1,
+            )
+
+        requested_names: list[str] = []
+        transport = StaticProviderTransport()
+        provider = TinyRequestMistral(
+            credential_reader=lambda name: requested_names.append(name) or "secret",
+            transport=transport,
+        )
+
+        with self.assertRaises(ProviderCallError) as caught:
+            provider.transcribe_chunk(
+                ProviderAudioUpload(
+                    data=b"audio-only",
+                    filename="audio-chunk-0001.mp3",
+                    content_type="audio/mpeg",
+                )
+            )
+
+        self.assertEqual(caught.exception.category, "size_format")
+        self.assertEqual(requested_names, [])
+        self.assertEqual(transport.calls, [])
+
+    def test_mistral_multipart_has_only_the_pinned_model_and_segment_timestamps(self) -> None:
+        upload = ProviderAudioUpload(
+            data=b"audio-only-canary",
+            filename="audio-chunk-0001.mp3",
+            content_type="audio/mpeg",
+        )
+        opener = FakeProviderOpener(
+            FakeHTTPResponse(
+                {
+                    "model": "voxtral-mini-2602",
+                    "usage": {"prompt_audio_seconds": 1.0},
+                    "segments": [],
+                }
+            )
+        )
+        provider = MistralTranscriptionProvider(
+            credential_reader=lambda _name: "secret",
+            transport=UrllibProviderTransport(opener=opener),
+        )
+
+        provider.transcribe_chunk(upload)
+
+        request, _ = opener.calls[0]
+        body = request.data
+        self.assertIn(b'name="model"', body)
+        self.assertIn(b"voxtral-mini-2602", body)
+        self.assertIn(b'name="timestamp_granularities"', body)
+        self.assertIn(b"segment", body)
+        self.assertNotIn(b"response_format", body)
+        self.assertNotIn(b"timestamp_granularities[]", body)
+        self.assertNotIn(b"file_url", body)
+        self.assertNotIn(b"file_id", body)
+
     def test_default_adapters_do_not_discover_dotenv_or_read_credentials_early(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {}, clear=True
@@ -1515,7 +1658,7 @@ class ProviderTranscriptionTests(unittest.TestCase):
             try:
                 os.chdir(directory)
                 providers = default_transcription_providers()
-                self.assertEqual(tuple(providers), ("openai", "groq"))
+                self.assertEqual(tuple(providers), ("openai", "groq", "mistral"))
                 upload = AudioChunkUpload(
                     data=b"audio-only",
                     filename="audio-chunk-0001.mp3",
