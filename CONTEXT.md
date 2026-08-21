@@ -116,6 +116,30 @@ _Avoid_: Coverage, confidence score
 Fresh, provider-specific authorization to send extracted audio for exactly one watch request. It is distinct from provider selection and separate host command-network approval.
 _Avoid_: API permission, network consent, persistent opt-in
 
+**Provider route**:
+The immutable provider-specific description of a Provider name, pinned model, destination, privacy-disclosure reference, credential slot, and complete encoded-request limit. It identifies a possible route; it does not grant selection, consent, approval, entitlement, or release availability.
+_Avoid_: Provider choice, provider permission, generic upload setting
+
+**Provider eligibility**:
+The runtime's determination that one Provider route may be considered for one specifically authorized future activity after every applicable selection, consent, approval, size, disclosure, and support-state gate. A configured adapter or available credential does not establish eligibility.
+_Avoid_: Registration, entitlement, default provider, enabled feature
+
+**Provider support state**:
+The documented scope in which a Provider route is available. `development/test-only` means an isolated adapter may be exercised only in non-release work; `release-disabled` means no release-facing or current end-user availability. Neither state is evidence of a live Provider request or release readiness.
+_Avoid_: Supported provider, available now, production-ready
+
+**Provider-network approval**:
+The separate, fresh, route- and audio-track-bound human authorization required after Audio-upload consent and before extraction, credential lookup, or Provider adapter invocation. Its opaque Provider-network approval receipt is single-use and same-session only.
+_Avoid_: Upload consent, source-host approval, reusable network permission
+
+**Prepared audio chunk**:
+One bounded, locally prepared in-memory audio payload from the selected track, with only a generated filename and content type, supplied at the batch-transcription boundary. It carries no video bytes, source path, workspace path, consent, approval, route, retry, or timing authority.
+_Avoid_: Media file, upload request, provider request, transcript chunk
+
+**Provider-derived transcript**:
+Normalized timestamped transcript evidence assembled by the Watch runtime from validated Provider chunk results. It is distinct from raw Provider responses and retains only the safe provenance and coverage needed to label the evidence truthfully.
+_Avoid_: Provider response, provider JSON, verified transcript, raw transcript
+
 **Watch workspace**:
 A uniquely identified temporary directory containing the intermediate media and evidence for one watch request and eligible for removal only through validated cleanup.
 _Avoid_: Temp folder, work dir, cache

@@ -128,7 +128,10 @@ caption, provider, or release action.
    limit—not merely nominal media-file size—including multipart/form-data
    boundaries, per-part headers, metadata, and every other request-body overhead,
    then a human-selected provider, a separate validation plan, and separate
-   explicit human approval immediately before that provider activity.
+   explicit human approval immediately before that provider activity. Mistral's
+   `voxtral-mini-2602` route is development/test-only and release-disabled: it
+   has no current end-user availability and must not be treated as an offered
+   provider.
 
 Do not request secrets in chat, scan `.env`, or make a provider request to diagnose credentials. Read [security and privacy](security-and-privacy.md) for the data boundary, outcome vocabulary, and validated cleanup protocol.
 

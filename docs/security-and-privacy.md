@@ -188,6 +188,20 @@ skill must never request secrets in chat, accept a secret as a control, scan
 command argument, probe an unselected provider, or silently fall back after a
 provider failure. No credential is read to decide which provider to present.
 
+Mistral's `voxtral-mini-2602` route is development/test-only and
+release-disabled. It has no current end-user availability. Before that Provider
+could be considered for a defined release scope, the human gate must verify
+entitlement, route-specific ZDR and current disclosure, a forward-test, approved
+live-provider evidence, and a human release decision. This lists required future
+evidence; it makes no claim about Mistral data residency, retention, price,
+account status, or live Provider behavior.
+
+Safe evidence is narrower than a Provider exchange. A safe persisted
+Provider-derived transcript provenance may retain the Provider route identity,
+pinned model, normalized segment timing, coverage, language, and aggregate
+Provider usage needed to describe the evidence. It MUST NOT retain raw requests,
+raw responses, credentials, headers, Provider-generated IDs, or audio paths.
+
 ## Truthful outcomes and retained evidence
 
 **Classification: implementation requirement. Evidence:** specification

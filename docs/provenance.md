@@ -200,6 +200,21 @@ An unavailable authorization, source, provider, or evidence record is `BLOCKED`
 or `UNVERIFIED`, never a pass. The unselected provider must not be marketed as
 live-verified.
 
+## Issue #56 provider-neutral route documentation record
+
+**Classification: implementation requirement. Evidence:** [Issue #56](https://github.com/prossima-ai/codex-watch-yt-video/issues/56), the inspected `b5ac2ccf9546e57f5bfa5b29182f8d6da4dbfd03` `origin/main` base, and the repository's hermetic documentation contract. This record documents a contract; it is not live-provider evidence, release authorization, or current end-user availability.
+
+| Record | Value | Boundary |
+| --- | --- | --- |
+| Provider-neutral terminology | `recorded` | `CONTEXT.md` defines Provider route, Provider eligibility, Provider support state, Audio-upload consent, Provider-network approval, Prepared audio chunk, and Provider-derived transcript so documentation and runtime boundaries use one vocabulary. |
+| Mistral support state | `development/test-only`; `release-disabled` | The `voxtral-mini-2602` route exists only as an isolated development/test adapter. It has no current end-user availability, and a credential, registered adapter, documentation change, or hermetic test cannot enable it. |
+| Remaining Mistral gates | `BLOCKED` | Required future evidence is verified entitlement, route-specific ZDR and current disclosure, a forward-test of the selected route/model, separately approved live-provider evidence, and a human release decision for a defined scope. This record makes no data-residency, retention, price, account, or live behavior claim. |
+| Safe Provider-derived transcript record | `limited provenance only` | A safe persisted Provider-derived transcript provenance may retain route identity, pinned model, normalized segment timing, coverage, language, and aggregate usage. It excludes raw requests, raw responses, credentials, headers, IDs, and audio paths. |
+
+No Mistral credential was read, audio prepared for upload, Provider request sent,
+account entitlement checked, route-specific ZDR verified, forward-test run, or
+live-provider evidence collected while creating this documentation record.
+
 ## Future immutable release record
 
 **Classification: implementation requirement. Evidence:** specification
