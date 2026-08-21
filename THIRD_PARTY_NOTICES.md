@@ -85,6 +85,24 @@ provider-network approval remain future implementation requirements. Neither the
 documentation check nor hermetic tests prove real endpoint acceptance, account
 availability, provider behavior, retention, or audio upload.
 
+### Development/test-only Mistral route
+
+**Classification: implementation requirement. Evidence:** inspected
+`b5ac2ccf9546e57f5bfa5b29182f8d6da4dbfd03` `origin/main` source at
+`.agents/skills/watch/scripts/watch_transcription.py` and the future-provider
+gate in [the specification](docs/spec/watch-skill.md#82-required-future-provider-gate).
+No Mistral documentation was inspected for this record.
+
+Mistral is development/test-only and release-disabled. Its `voxtral-mini-2602`
+route does not add a current end-user feature or relax any Provider eligibility,
+entitlement, disclosure, complete-request-size, consent, approval, forward-test,
+live-evidence, or human release-decision gate.
+
+This record makes no Mistral entitlement, route-specific ZDR, data residency,
+retention, price, endpoint-acceptance, or live-provider claim. A current
+disclosure, separately approved live-provider evidence, and a human release
+decision for a defined scope remain future gates.
+
 ## Behavioral-parity reference
 
 **Classification: confirmed. Evidence:** [upstream v0.2.0 release](https://github.com/bradautomates/claude-video/releases/tag/v0.2.0), [pinned tree](https://github.com/bradautomates/claude-video/tree/83da59fa78c3eee9e20f515fe75c438bb5166efd), and [MIT license](https://github.com/bradautomates/claude-video/blob/83da59fa78c3eee9e20f515fe75c438bb5166efd/LICENSE).

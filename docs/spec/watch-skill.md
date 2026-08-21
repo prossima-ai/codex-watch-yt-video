@@ -320,11 +320,15 @@ Transcription is release-disabled. No release-facing action surface may invoke p
 
 The repository may retain isolated adapter code and dated provider documentation for future work, but that is not an enabled provider, a live validation, or release authorization. There is no default provider and no silent cross-provider fallback. Credentials may come only from an external key manager or named environment variables `OPENAI_API_KEY`, `GROQ_API_KEY`, and the development/test-only `MISTRAL_API_KEY`. Each selected adapter reads only its own value at provider call time; the release-facing runtime MUST NOT read any of them. The skill MUST NOT request secrets in chat, accept a secret value as a control, scan/read `.env`, persist a secret, print it, place it in arguments/filenames/URLs/reports, or probe one provider’s key after another fails. It MUST NOT revoke or delete a credential.
 
+Mistral's `voxtral-mini-2602` Provider route is development/test-only and remains release-disabled. It records an isolated adapter route, not current end-user availability, entitlement, a live Provider request, or release readiness. Its Provider support state cannot change through adapter registration, a credential, hermetic tests, or this specification.
+
 ### 8.2 Required future provider gate
 
 Before a human can consider enabling exactly one provider, that provider needs a conservative, provider-specific effective upload limit that is implemented and hermetically tested. It MUST account for the complete encoded request, including the media bytes, multipart/form-data boundaries, per-part headers, field names, metadata, and all other request-body overhead; it is not merely nominal media-file size. A generic file-size cap, a source-media size, or a nominal provider limit is not sufficient evidence for provider safety.
 
 Only after that gate is complete may a human select exactly one provider, review a separate provider-specific validation plan, and grant separate explicit human approval immediately before that provider activity. The plan must identify the selected provider/model, destination, current account/plan limit, complete request-size accounting, audio-only form, fresh provider-specific consent, separate provider-network approval, redaction/evidence handling, duration, and success criteria. Neither a direct-caption approval nor a human release decision authorizes a provider request.
+
+For Mistral, the remaining release-disabled gates include verified account entitlement; route-specific ZDR and other current disclosure; a forward-test of the selected route and model; separately approved live-provider evidence; and a human release decision for a defined scope. These are gates to prove later, not claims about Mistral data residency, retention, price, service behavior, or current availability.
 
 ### 8.3 Future consent and upload requirements
 

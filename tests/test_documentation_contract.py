@@ -17,6 +17,12 @@ ISSUE32_EVIDENCE = REPOSITORY_ROOT / "docs" / "verification" / "issue-32-evidenc
 SPECIFICATION = REPOSITORY_ROOT / "docs" / "spec" / "watch-skill.md"
 WATCH_SKILL = REPOSITORY_ROOT / ".agents" / "skills" / "watch" / "SKILL.md"
 DOMAIN_CONTEXT = REPOSITORY_ROOT / "CONTEXT.md"
+PROVIDER_ROUTE_ADR = (
+    REPOSITORY_ROOT
+    / "docs"
+    / "adr"
+    / "0001-provider-neutral-transcription-route.md"
+)
 PUBLIC_DOCUMENTS = (
     README,
     SETUP_AND_TROUBLESHOOTING,
@@ -180,6 +186,79 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(disclosure=disclosure):
                 self.assertIn(disclosure, context)
+
+    def test_issue56_documents_the_provider_route_and_release_disabled_mistral_posture(
+        self,
+    ) -> None:
+        context = self._collapsed(DOMAIN_CONTEXT)
+        self.assertTrue(PROVIDER_ROUTE_ADR.is_file())
+        adr = self._collapsed(PROVIDER_ROUTE_ADR)
+        specification = self._collapsed(SPECIFICATION)
+        setup = self._collapsed(SETUP_AND_TROUBLESHOOTING)
+        security = self._collapsed(SECURITY_AND_PRIVACY)
+        notices = self._collapsed(THIRD_PARTY_NOTICES)
+        provenance = self._collapsed(PROVENANCE)
+
+        for term in (
+            "Provider route",
+            "Provider eligibility",
+            "Provider support state",
+            "Audio-upload consent",
+            "Provider-network approval",
+            "Prepared audio chunk",
+            "Provider-derived transcript",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, context)
+
+        for disclosure in (
+            "development/test-only",
+            "release-disabled",
+            "Mistral",
+            "no current end-user availability",
+            "entitlement",
+            "route-specific ZDR",
+            "forward-test",
+            "live-provider evidence",
+            "human release decision",
+        ):
+            with self.subTest(document="adr", disclosure=disclosure):
+                self.assertIn(disclosure, adr)
+
+        for document, label in (
+            (specification, "specification"),
+            (setup, "setup"),
+            (security, "security"),
+            (notices, "notices"),
+            (provenance, "provenance"),
+        ):
+            for disclosure in (
+                "Mistral",
+                "development/test-only",
+                "release-disabled",
+            ):
+                with self.subTest(document=label, disclosure=disclosure):
+                    self.assertIn(disclosure, document)
+
+        for disclosure in (
+            "Development/test-only Mistral route",
+            "**Classification: implementation requirement. Evidence:** inspected",
+            "b5ac2ccf9546e57f5bfa5b29182f8d6da4dbfd03",
+        ):
+            with self.subTest(document="notices", disclosure=disclosure):
+                self.assertIn(disclosure, notices)
+
+        for disclosure in (
+            "safe persisted Provider-derived transcript provenance",
+            "raw requests",
+            "raw responses",
+            "credentials",
+            "headers",
+            "IDs",
+            "audio paths",
+        ):
+            with self.subTest(document="security", disclosure=disclosure):
+                self.assertIn(disclosure, security)
 
     def test_transcription_is_release_disabled_pending_effective_request_size_gate(
         self,

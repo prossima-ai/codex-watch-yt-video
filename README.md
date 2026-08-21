@@ -119,3 +119,8 @@ multipart/form-data boundaries, per-part headers, metadata, and every other
 request-body overhead, followed by a separate validation plan and separate
 explicit human approval. A human release decision, if one is later made, does
 not authorize provider enablement or a live request.
+
+Mistral's `voxtral-mini-2602` Provider route is development/test-only and
+release-disabled, not a current end-user feature. Its remaining entitlement,
+route-specific ZDR, forward-test, live-provider-evidence, disclosure, and human
+release-decision gates are recorded in the [provider-route ADR](docs/adr/0001-provider-neutral-transcription-route.md).
