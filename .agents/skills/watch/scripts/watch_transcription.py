@@ -29,6 +29,7 @@ ProviderName = Literal["openai", "groq", "mistral"]
 OPENAI_MAX_AUDIO_CHUNK_BYTES = 19_000_000
 OPENAI_MAX_ENCODED_REQUEST_BYTES = 20_000_000
 # Conservative local development bounds, not a claim about Mistral entitlement.
+MISTRAL_MODEL = "voxtral-mini-2602"
 MISTRAL_MAX_AUDIO_CHUNK_BYTES = 19_000_000
 MISTRAL_MAX_ENCODED_REQUEST_BYTES = 20_000_000
 TRANSCRIPTION_RELEASE_ENABLED = False
@@ -434,7 +435,7 @@ class MistralTranscriptionProvider:
 
     descriptor = ProviderDescriptor(
         provider="mistral",
-        model="voxtral-mini-2602",
+        model=MISTRAL_MODEL,
         destination="https://api.mistral.ai/v1/audio/transcriptions",
         privacy_url="https://docs.mistral.ai/admin/monitor-comply/privacy-data-controls",
         max_chunk_bytes=MISTRAL_MAX_AUDIO_CHUNK_BYTES,
@@ -858,7 +859,7 @@ def _parse_provider_result(value: object) -> ProviderChunkResult:
 
 
 def _parse_mistral_provider_result(value: object) -> ProviderChunkResult:
-    if not isinstance(value, Mapping) or value.get("model") != "voxtral-mini-2602":
+    if not isinstance(value, Mapping) or value.get("model") != MISTRAL_MODEL:
         raise ValueError("The selected provider returned an invalid transcription object.")
     usage = value.get("usage")
     if usage is None:
